@@ -1,0 +1,39 @@
+<Project>
+
+  <!--
+    Settings shared by every project in the repository.
+    TargetFramework stays in the individual project files so contributors find
+    it where they expect it.
+  -->
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <!--
+    Warnings are defects that have not been triaged yet. Treating them as
+    errors keeps them from accumulating silently.
+  -->
+  <PropertyGroup>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+  </PropertyGroup>
+
+  <!--
+    Code style rules live in .editorconfig and are enforced by the IDE only.
+    They are deliberately not part of the build: a misplaced brace should not
+    break compilation the way a real analyzer finding should.
+  -->
+  <PropertyGroup>
+    <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Product>FileOrganizer</Product>
+    <NeutralLanguage>en</NeutralLanguage>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+</Project>
