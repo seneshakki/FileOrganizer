@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Adapters between the domain and the machine: the real file system, the
+    watcher, configuration storage. Platform-specific behaviour is allowed to
+    live here, never in Core.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FileOrganizer.Core\FileOrganizer.Core.csproj" />
+  </ItemGroup>
+
+</Project>
