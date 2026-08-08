@@ -2,4 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/FileOrganizer.Core/FileOrganizer.Core.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FileOrganizer.Core.Tests/FileOrganizer.Core.Tests.csproj" />
+  </Folder>
 </Solution>
