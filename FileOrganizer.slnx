@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/FileOrganizer.App/FileOrganizer.App.csproj" />
     <Project Path="src/FileOrganizer.Core/FileOrganizer.Core.csproj" />
     <Project Path="src/FileOrganizer.Infrastructure/FileOrganizer.Infrastructure.csproj" />
   </Folder>

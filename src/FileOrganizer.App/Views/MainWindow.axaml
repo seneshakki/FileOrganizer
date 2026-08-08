@@ -1,0 +1,21 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:FileOrganizer.App.ViewModels"
+        x:Class="FileOrganizer.App.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Title="{Binding Title}"
+        Width="760" Height="520"
+        MinWidth="480" MinHeight="320">
+
+  <StackPanel Margin="32" Spacing="12" VerticalAlignment="Center">
+    <TextBlock Text="{Binding Title}"
+               FontSize="28"
+               FontWeight="SemiBold" />
+    <TextBlock Text="{Binding Summary}"
+               Opacity="0.7"
+               MaxWidth="520"
+               HorizontalAlignment="Left"
+               TextWrapping="Wrap" />
+  </StackPanel>
+
+</Window>
