@@ -54,7 +54,9 @@ public sealed class ExtensionConditionTests
     {
         ExtensionCondition condition = new([".zip"], CaseSensitivity.Sensitive);
 
-        Assert.False(condition.Evaluate(TestFiles.Create("backup.ZIP"), Context).IsMatch);
+        Assert.Equal(
+            MatchOutcome.NoMatch,
+            condition.Evaluate(TestFiles.Create("backup.ZIP"), Context).Outcome);
         Assert.True(condition.Evaluate(TestFiles.Create("backup.zip"), Context).IsMatch);
     }
 
@@ -123,6 +125,32 @@ public sealed class ExtensionConditionTests
         ExtensionCondition condition = new([".tar.gz"]);
 
         AssertMisconfigured(condition, TestFiles.Create("archive.tar.gz"));
+    }
+
+    [Theory]
+    [InlineData(".")]
+    [InlineData(" . ")]
+    public void ReportsADotRatherThanTreatingItAsAnExtension(string configured)
+    {
+        ExtensionCondition condition = new([configured]);
+
+        AssertMisconfigured(condition, TestFiles.Create("report."));
+    }
+
+    [Fact]
+    public void TakesAReadOnlySnapshotOfTheConfiguredExtensions()
+    {
+        string[] extensions = [".pdf"];
+        ExtensionCondition condition = new(extensions);
+
+        extensions[0] = ".txt";
+
+        Assert.Equal([".pdf"], condition.Extensions);
+        Assert.Equal(
+            MatchOutcome.Match,
+            condition.Evaluate(TestFiles.Create("report.pdf"), Context).Outcome);
+        Assert.Throws<NotSupportedException>(
+            () => ((IList<string>)condition.Extensions)[0] = ".txt");
     }
 
     [Fact]

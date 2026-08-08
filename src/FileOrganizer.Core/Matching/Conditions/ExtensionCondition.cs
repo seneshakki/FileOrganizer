@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using FileOrganizer.Core.Files;
 
 namespace FileOrganizer.Core.Matching.Conditions;
@@ -15,7 +16,7 @@ public sealed class ExtensionCondition : Condition
     /// <summary>The entry that matches files without an extension.</summary>
     public const string NoExtension = "";
 
-    private readonly string[] _extensions;
+    private readonly ReadOnlyCollection<string> _extensions;
     private readonly CaseSensitivity _caseSensitivity;
 
     /// <param name="extensions">
@@ -35,7 +36,7 @@ public sealed class ExtensionCondition : Condition
     private ExtensionCondition(string[] extensions, CaseSensitivity caseSensitivity)
         : base(Describe(extensions, caseSensitivity))
     {
-        _extensions = Array.ConvertAll(extensions, Normalize);
+        _extensions = Array.AsReadOnly(Array.ConvertAll(extensions, Normalize));
         _caseSensitivity = caseSensitivity;
     }
 
@@ -96,6 +97,13 @@ public sealed class ExtensionCondition : Condition
             {
                 return InvalidConfiguration(
                     "A blank extension entry is ambiguous. Use an empty entry to mean "
+                    + "files with no extension.");
+            }
+
+            if (normalized == ".")
+            {
+                return InvalidConfiguration(
+                    "A dot by itself is not an extension. Use an empty entry to mean "
                     + "files with no extension.");
             }
 

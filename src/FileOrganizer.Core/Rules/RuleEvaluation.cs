@@ -14,7 +14,7 @@ public sealed class RuleEvaluation
     {
         Rule = rule;
         Outcome = outcome;
-        Problems = problems;
+        Problems = Array.AsReadOnly(problems.ToArray());
     }
 
     /// <summary>Gets the rule that was evaluated.</summary>

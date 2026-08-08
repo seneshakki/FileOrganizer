@@ -6,12 +6,15 @@ namespace FileOrganizer.Core.Matching;
 /// </summary>
 public sealed class ConditionResult
 {
-    private static readonly IReadOnlyList<EvaluationProblem> NoProblems = [];
+    private static readonly IReadOnlyList<EvaluationProblem> NoProblems =
+        Array.AsReadOnly(Array.Empty<EvaluationProblem>());
 
     private ConditionResult(MatchOutcome outcome, IReadOnlyList<EvaluationProblem> problems)
     {
         Outcome = outcome;
-        Problems = problems;
+        Problems = problems.Count == 0
+            ? NoProblems
+            : Array.AsReadOnly(problems.ToArray());
     }
 
     /// <summary>A definite match, with nothing to report.</summary>

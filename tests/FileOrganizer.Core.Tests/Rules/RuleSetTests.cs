@@ -38,6 +38,20 @@ public sealed class RuleSetTests
     }
 
     [Fact]
+    public void TakesAReadOnlySnapshotOfTheRules()
+    {
+        Rule original = Matching("original", order: 0);
+        Rule[] rules = [original];
+        RuleSet set = new(rules);
+
+        rules[0] = Matching("replacement", order: 0);
+
+        Assert.Same(original, set.Rules[0]);
+        Assert.Throws<NotSupportedException>(
+            () => ((IList<Rule>)set.Rules)[0] = rules[0]);
+    }
+
+    [Fact]
     public void PicksTheFirstRuleThatApplies()
     {
         Rule winner = Matching("winner", order: 1);
@@ -139,6 +153,11 @@ public sealed class RuleSetTests
 
         Assert.Equal(RuleSetOutcome.Blocked, evaluation.Outcome);
         Assert.Equal(["a", "b"], evaluation.Problems.Select(problem => problem.Description));
+        Assert.Throws<NotSupportedException>(
+            () => ((IList<RuleEvaluation>)evaluation.Evaluations)[0] = evaluation.Evaluations[1]);
+        Assert.Throws<NotSupportedException>(
+            () => ((IList<EvaluationProblem>)evaluation.Problems)[0] =
+                new EvaluationProblem(EvaluationProblemKind.MetadataUnavailable, "replacement"));
     }
 
     [Fact]

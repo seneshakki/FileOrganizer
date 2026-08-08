@@ -40,14 +40,18 @@ public sealed class RuleTests
     }
 
     [Fact]
-    public void DoesNotRunInclusionOnceExclusionIsCertain()
+    public void ExcludedRecordsTheVetoWithoutEvaluatingInclusion()
     {
-        StubCondition include = StubCondition.Matching();
-        Rule rule = new("test", include, StubCondition.Matching());
+        StubCondition include = StubCondition.Undetermined("inclusion was not evaluated");
+        StubCondition exclude = StubCondition.Matching();
+        Rule rule = new("test", include, exclude);
 
-        rule.Evaluate(TestFiles.Create(), Context);
+        RuleEvaluation evaluation = rule.Evaluate(TestFiles.Create(), Context);
 
+        Assert.Equal(RuleOutcome.Excluded, evaluation.Outcome);
         Assert.Equal(0, include.EvaluationCount);
+        Assert.Equal(1, exclude.EvaluationCount);
+        Assert.Empty(evaluation.Problems);
     }
 
     [Fact]
@@ -103,6 +107,9 @@ public sealed class RuleTests
         Assert.Equal(
             "creation time was not reported",
             Assert.Single(evaluation.Problems).Description);
+        Assert.Throws<NotSupportedException>(
+            () => ((IList<EvaluationProblem>)evaluation.Problems)[0] =
+                new EvaluationProblem(EvaluationProblemKind.MetadataUnavailable, "replacement"));
     }
 
     [Fact]

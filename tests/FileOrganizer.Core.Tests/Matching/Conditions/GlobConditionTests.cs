@@ -26,7 +26,9 @@ public sealed class GlobConditionTests
     {
         GlobCondition condition = new(pattern);
 
-        Assert.Equal(expected, condition.Evaluate(TestFiles.Create(fileName), Context).IsMatch);
+        Assert.Equal(
+            expected ? MatchOutcome.Match : MatchOutcome.NoMatch,
+            condition.Evaluate(TestFiles.Create(fileName), Context).Outcome);
     }
 
     [Theory]
@@ -42,7 +44,9 @@ public sealed class GlobConditionTests
     {
         GlobCondition condition = new(pattern);
 
-        Assert.Equal(expected, condition.Evaluate(TestFiles.Create(fileName), Context).IsMatch);
+        Assert.Equal(
+            expected ? MatchOutcome.Match : MatchOutcome.NoMatch,
+            condition.Evaluate(TestFiles.Create(fileName), Context).Outcome);
     }
 
     [Fact]
@@ -89,7 +93,9 @@ public sealed class GlobConditionTests
     {
         GlobCondition condition = new("*.txt", caseSensitivity: CaseSensitivity.Sensitive);
 
-        Assert.False(condition.Evaluate(TestFiles.Create("NOTES.TXT"), Context).IsMatch);
+        Assert.Equal(
+            MatchOutcome.NoMatch,
+            condition.Evaluate(TestFiles.Create("NOTES.TXT"), Context).Outcome);
         Assert.True(condition.Evaluate(TestFiles.Create("notes.txt"), Context).IsMatch);
     }
 
@@ -134,6 +140,9 @@ public sealed class GlobConditionTests
         GlobCondition condition = new("*.pdf", (NameTarget)5);
 
         Assert.False(condition.IsValid);
+        Assert.Equal(
+            EvaluationProblemKind.InvalidConfiguration,
+            Assert.Single(condition.Validate()).Kind);
         Assert.Equal(
             MatchOutcome.Indeterminate,
             condition.Evaluate(TestFiles.Create("report.pdf"), Context).Outcome);

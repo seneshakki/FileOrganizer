@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using FileOrganizer.Core.Files;
 using FileOrganizer.Core.Matching;
 
@@ -19,7 +20,7 @@ namespace FileOrganizer.Core.Rules;
 /// </remarks>
 public sealed class RuleSet
 {
-    private readonly Rule[] _rules;
+    private readonly ReadOnlyCollection<Rule> _rules;
 
     /// <param name="rules">
     /// The rules, in any order. They are sorted here; the caller's sequence only
@@ -38,7 +39,7 @@ public sealed class RuleSet
 
         // OrderBy is a stable sort, which is what makes equal orders keep the
         // sequence they arrived in.
-        _rules = [.. given.OrderBy(rule => rule.Order)];
+        _rules = Array.AsReadOnly(given.OrderBy(rule => rule.Order).ToArray());
     }
 
     /// <summary>Gets the rules in the order they will be evaluated.</summary>

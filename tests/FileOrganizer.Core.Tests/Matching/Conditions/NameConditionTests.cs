@@ -31,8 +31,8 @@ public sealed class NameConditionTests
         NameCondition condition = new(NameTarget.FullName, textOperator, value);
 
         Assert.Equal(
-            expected,
-            condition.Evaluate(TestFiles.Create("invoice-2026.pdf"), Context).IsMatch);
+            expected ? MatchOutcome.Match : MatchOutcome.NoMatch,
+            condition.Evaluate(TestFiles.Create("invoice-2026.pdf"), Context).Outcome);
     }
 
     [Fact]
@@ -86,7 +86,9 @@ public sealed class NameConditionTests
             "INVOICE",
             CaseSensitivity.Sensitive);
 
-        Assert.False(condition.Evaluate(TestFiles.Create("invoice-2026.pdf"), Context).IsMatch);
+        Assert.Equal(
+            MatchOutcome.NoMatch,
+            condition.Evaluate(TestFiles.Create("invoice-2026.pdf"), Context).Outcome);
     }
 
     [Fact]
@@ -147,6 +149,9 @@ public sealed class NameConditionTests
         NameCondition condition = new(NameTarget.FullName, (TextOperator)77, "invoice");
 
         Assert.False(condition.IsValid);
+        Assert.Equal(
+            EvaluationProblemKind.InvalidConfiguration,
+            Assert.Single(condition.Validate()).Kind);
         Assert.Equal(
             MatchOutcome.Indeterminate,
             condition.Evaluate(TestFiles.Create("invoice.pdf"), Context).Outcome);

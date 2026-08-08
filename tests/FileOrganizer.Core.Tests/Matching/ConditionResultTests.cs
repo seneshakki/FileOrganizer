@@ -28,6 +28,9 @@ public sealed class ConditionResultTests
         Assert.Equal(MatchOutcome.Indeterminate, result.Outcome);
         Assert.False(result.IsMatch);
         Assert.Same(problem, Assert.Single(result.Problems));
+        Assert.Throws<NotSupportedException>(
+            () => ((IList<EvaluationProblem>)result.Problems)[0] =
+                new EvaluationProblem(EvaluationProblemKind.MetadataUnavailable, "replacement"));
     }
 
     [Fact]

@@ -8,6 +8,15 @@ namespace FileOrganizer.Core.Files;
 /// keeps them deterministic and free of file system access, but it also means
 /// a snapshot can be stale by the time an operation actually runs. Whoever
 /// executes an operation is responsible for re-verifying the file first.
+///
+/// Core verifies only lexical invariants: the path is fully qualified in the
+/// host platform's format and its final component is exactly <see cref="Name"/>.
+/// The snapshot producer is responsible for confirming that the path denotes a
+/// real regular file and that the metadata came from it. Core does not access
+/// the file system, resolve links, enforce filesystem-specific naming rules or
+/// establish containment within a root. Timestamp order is not constrained:
+/// copying, restoration and clock skew can all produce surprising but real
+/// combinations.
 /// </remarks>
 public sealed class FileEntry
 {
@@ -37,6 +46,35 @@ public sealed class FileEntry
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ArgumentOutOfRangeException.ThrowIfNegative(sizeInBytes);
 
+        if (fullPath.Contains('\0'))
+        {
+            throw new ArgumentException("A file path cannot contain a null character.", nameof(fullPath));
+        }
+
+        if (name.Contains('\0'))
+        {
+            throw new ArgumentException("A file name cannot contain a null character.", nameof(name));
+        }
+
+        if (!Path.IsPathFullyQualified(fullPath))
+        {
+            throw new ArgumentException("A file path must be fully qualified.", nameof(fullPath));
+        }
+
+        if (name is "." or ".." || !string.Equals(Path.GetFileName(name), name, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "A file name must be a single file name with no directory part.",
+                nameof(name));
+        }
+
+        if (!string.Equals(Path.GetFileName(fullPath), name, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "The file name must exactly match the final component of the full path.",
+                nameof(name));
+        }
+
         FullPath = fullPath;
         Name = name;
         SizeInBytes = sizeInBytes;
@@ -59,7 +97,7 @@ public sealed class FileEntry
         }
     }
 
-    /// <summary>Gets the absolute path of the file.</summary>
+    /// <summary>Gets the fully qualified path of the file.</summary>
     public string FullPath { get; }
 
     /// <summary>Gets the file name including its extension.</summary>

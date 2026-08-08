@@ -33,8 +33,8 @@ public sealed class AgeConditionTests
         AgeCondition condition = new(TimestampField.Modified, comparisonOperator, ThirtyDays);
 
         Assert.Equal(
-            expected,
-            condition.Evaluate(TestFiles.Create(modified: modified), Context).IsMatch);
+            expected ? MatchOutcome.Match : MatchOutcome.NoMatch,
+            condition.Evaluate(TestFiles.Create(modified: modified), Context).Outcome);
     }
 
     [Fact]
@@ -59,8 +59,9 @@ public sealed class AgeConditionTests
         AgeCondition olderThan =
             new(TimestampField.Modified, ComparisonOperator.GreaterThan, ThirtyDays);
 
-        Assert.False(
-            olderThan.Evaluate(TestFiles.Create(modified: Now.AddDays(5)), Context).IsMatch);
+        Assert.Equal(
+            MatchOutcome.NoMatch,
+            olderThan.Evaluate(TestFiles.Create(modified: Now.AddDays(5)), Context).Outcome);
     }
 
     [Fact]

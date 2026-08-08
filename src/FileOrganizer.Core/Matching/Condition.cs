@@ -23,8 +23,11 @@ public abstract class Condition : ICondition
     protected Condition(EvaluationProblem? configurationProblem) =>
         _configurationProblem = configurationProblem;
 
-    /// <summary>Gets whether this condition is usable as configured.</summary>
-    public bool IsValid => _configurationProblem is null;
+    /// <summary>
+    /// Gets whether this condition and every condition nested beneath it are
+    /// usable as configured.
+    /// </summary>
+    public bool IsValid => !Validate().Any();
 
     /// <inheritdoc />
     public ConditionResult Evaluate(FileEntry file, EvaluationContext context)

@@ -1,5 +1,6 @@
 using FileOrganizer.Core.Matching;
 using FileOrganizer.Core.Matching.Conditions;
+using FileOrganizer.Core.Matching.Logical;
 
 namespace FileOrganizer.Core.Tests.Matching.Conditions;
 
@@ -20,7 +21,9 @@ public sealed class RegexConditionTests
     {
         RegexCondition condition = new(pattern);
 
-        Assert.Equal(expected, condition.Evaluate(TestFiles.Create(fileName), Context).IsMatch);
+        Assert.Equal(
+            expected ? MatchOutcome.Match : MatchOutcome.NoMatch,
+            condition.Evaluate(TestFiles.Create(fileName), Context).Outcome);
     }
 
     [Fact]
@@ -52,7 +55,9 @@ public sealed class RegexConditionTests
     {
         RegexCondition condition = new("invoice", caseSensitivity: CaseSensitivity.Sensitive);
 
-        Assert.False(condition.Evaluate(TestFiles.Create("INVOICE.pdf"), Context).IsMatch);
+        Assert.Equal(
+            MatchOutcome.NoMatch,
+            condition.Evaluate(TestFiles.Create("INVOICE.pdf"), Context).Outcome);
     }
 
     [Fact]
@@ -87,7 +92,10 @@ public sealed class RegexConditionTests
 
         Assert.True(condition.IsValid);
         Assert.True(condition.Evaluate(TestFiles.Create("invoice-2026.pdf"), Context).IsMatch);
-        Assert.False(condition.Evaluate(TestFiles.Create("receipt-2026.pdf"), Context).IsMatch);
+
+        ConditionResult noMatch = condition.Evaluate(TestFiles.Create("receipt-2026.pdf"), Context);
+        Assert.Equal(MatchOutcome.NoMatch, noMatch.Outcome);
+        Assert.Empty(noMatch.Problems);
     }
 
     [Fact]
@@ -110,6 +118,10 @@ public sealed class RegexConditionTests
         // Nothing is wrong with the rule as written; it is only too slow here.
         Assert.True(condition.IsValid);
         Assert.Empty(condition.Validate());
+
+        AndCondition tree = new(condition);
+        Assert.True(tree.IsValid);
+        Assert.Empty(tree.Validate());
     }
 
     [Theory]
@@ -154,7 +166,12 @@ public sealed class RegexConditionTests
         RegexCondition condition = new(pattern!);
 
         Assert.False(condition.IsValid);
-        Assert.Single(condition.Validate());
+        Assert.Equal(
+            EvaluationProblemKind.InvalidConfiguration,
+            Assert.Single(condition.Validate()).Kind);
+        Assert.Equal(
+            MatchOutcome.Indeterminate,
+            condition.Evaluate(TestFiles.Create(), Context).Outcome);
     }
 
     [Fact]
@@ -166,5 +183,8 @@ public sealed class RegexConditionTests
         Assert.Equal(
             EvaluationProblemKind.InvalidConfiguration,
             Assert.Single(condition.Validate()).Kind);
+        Assert.Equal(
+            MatchOutcome.Indeterminate,
+            condition.Evaluate(TestFiles.Create(), Context).Outcome);
     }
 }

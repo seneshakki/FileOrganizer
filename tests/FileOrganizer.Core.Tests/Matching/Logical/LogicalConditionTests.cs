@@ -1,5 +1,6 @@
 using FileOrganizer.Core.Files;
 using FileOrganizer.Core.Matching;
+using FileOrganizer.Core.Matching.Conditions;
 using FileOrganizer.Core.Matching.Logical;
 
 namespace FileOrganizer.Core.Tests.Matching.Logical;
@@ -156,18 +157,24 @@ public sealed class LogicalConditionTests
     }
 
     [Fact]
-    public void ValidateReachesNestedConditions()
+    public void ValidityReachesEveryNestedCondition()
     {
-        AndCondition condition = new(
+        RegexCondition invalidRegex = new("(");
+        NotCondition not = new(invalidRegex);
+        OrCondition or = new(
             StubCondition.Matching(),
-            new OrCondition(
-                new NotCondition(StubCondition.MatchingButInvalid("inner pattern is broken")),
-                StubCondition.Matching()));
+            not);
+        AndCondition and = new(
+            StubCondition.Matching(),
+            or);
 
-        EvaluationProblem problem = Assert.Single(condition.Validate());
+        foreach (Condition condition in (Condition[])[invalidRegex, not, or, and])
+        {
+            Assert.False(condition.IsValid);
 
-        Assert.Equal("inner pattern is broken", problem.Description);
-        Assert.Equal(EvaluationProblemKind.InvalidConfiguration, problem.Kind);
+            EvaluationProblem problem = Assert.Single(condition.Validate());
+            Assert.Equal(EvaluationProblemKind.InvalidConfiguration, problem.Kind);
+        }
     }
 
     [Fact]
@@ -175,7 +182,23 @@ public sealed class LogicalConditionTests
     {
         AndCondition condition = new(StubCondition.Matching(), StubCondition.NotMatching());
 
+        Assert.True(condition.IsValid);
         Assert.Empty(condition.Validate());
+    }
+
+    [Fact]
+    public void TakesAReadOnlySnapshotOfItsChildren()
+    {
+        StubCondition original = StubCondition.Matching();
+        ICondition[] children = [original];
+        AndCondition condition = new(children);
+
+        children[0] = StubCondition.NotMatching();
+
+        Assert.Same(original, condition.Children[0]);
+        Assert.Equal(MatchOutcome.Match, condition.Evaluate(AnyFile, Context).Outcome);
+        Assert.Throws<NotSupportedException>(
+            () => ((IList<ICondition>)condition.Children)[0] = StubCondition.NotMatching());
     }
 
     [Fact]

@@ -30,12 +30,12 @@ public sealed class TimestampConditionTests
             new(TimestampField.Modified, comparisonOperator, Threshold);
 
         Assert.Equal(
-            expected,
+            expected ? MatchOutcome.Match : MatchOutcome.NoMatch,
             condition
                 .Evaluate(
                     TestFiles.Create(modified: Threshold.AddSeconds(offsetInSeconds)),
                     Context)
-                .IsMatch);
+                .Outcome);
     }
 
     [Fact]
@@ -103,8 +103,16 @@ public sealed class TimestampConditionTests
 
         Assert.False(unknownField.IsValid);
         Assert.False(unknownComparison.IsValid);
+        Assert.All(
+            new[] { unknownField, unknownComparison },
+            condition => Assert.Equal(
+                EvaluationProblemKind.InvalidConfiguration,
+                Assert.Single(condition.Validate()).Kind));
         Assert.Equal(
             MatchOutcome.Indeterminate,
             unknownField.Evaluate(TestFiles.Create(), Context).Outcome);
+        Assert.Equal(
+            MatchOutcome.Indeterminate,
+            unknownComparison.Evaluate(TestFiles.Create(), Context).Outcome);
     }
 }

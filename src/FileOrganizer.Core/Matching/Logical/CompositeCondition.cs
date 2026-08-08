@@ -1,3 +1,5 @@
+using System.Collections.ObjectModel;
+
 namespace FileOrganizer.Core.Matching.Logical;
 
 /// <summary>
@@ -11,6 +13,11 @@ public abstract class CompositeCondition : Condition
     /// <see langword="null"/>.
     /// </exception>
     protected CompositeCondition(ICondition[] children)
+        : this(Snapshot(children))
+    {
+    }
+
+    private CompositeCondition(ReadOnlyCollection<ICondition> children)
         : base(DescribeProblem(children))
     {
         Children = children;
@@ -40,18 +47,24 @@ public abstract class CompositeCondition : Condition
         problems.AddRange(result.Problems);
     }
 
-    private static EvaluationProblem? DescribeProblem(ICondition[] children)
+    private static ReadOnlyCollection<ICondition> Snapshot(ICondition[] children)
+    {
+        ArgumentNullException.ThrowIfNull(children);
+
+        return Array.AsReadOnly(children.ToArray());
+    }
+
+    private static EvaluationProblem? DescribeProblem(ReadOnlyCollection<ICondition> children)
     {
         // A null child is a programming mistake rather than something a user
         // could have typed, so it is not modelled as a rule problem.
-        ArgumentNullException.ThrowIfNull(children);
 
         foreach (ICondition child in children)
         {
             ArgumentNullException.ThrowIfNull(child, nameof(children));
         }
 
-        return children.Length == 0
+        return children.Count == 0
             ? InvalidConfiguration("A combined condition needs at least one condition to combine.")
             : null;
     }

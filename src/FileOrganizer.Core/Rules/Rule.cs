@@ -4,15 +4,15 @@ using FileOrganizer.Core.Matching;
 namespace FileOrganizer.Core.Rules;
 
 /// <summary>
-/// One named decision: which files this rule claims, and which of those it
-/// hands back.
+/// One named decision: which files this rule claims, subject to an exclusion
+/// condition that can veto the rule without first evaluating inclusion.
 /// </summary>
 /// <remarks>
 /// A rule applies to a file when its inclusion conditions match and its
-/// exclusion conditions do not. Exclusion is checked first and wins outright:
-/// when a file matches both, the rule does not apply. Excluding is the
-/// conservative half of the pair — it can only ever cause fewer files to be
-/// touched — so it is the half that gets the final say.
+/// exclusion conditions do not. Exclusion is checked first and wins outright.
+/// A result of <see cref="RuleOutcome.Excluded"/> therefore means the exclusion
+/// matched; it deliberately makes no claim about inclusion, which was not
+/// evaluated because it could not change the decision.
 ///
 /// The same reasoning decides what happens when something cannot be decided. If
 /// exclusion is undecidable, the rule is undecidable too, even if inclusion
@@ -25,8 +25,8 @@ public sealed class Rule
     /// <param name="name">A name for the rule, shown to the user.</param>
     /// <param name="include">The conditions a file must match.</param>
     /// <param name="exclude">
-    /// Conditions that keep a matching file out, or <see langword="null"/> when
-    /// the rule excludes nothing.
+    /// Conditions that veto this rule for a file, or <see langword="null"/>
+    /// when the rule has no veto.
     /// </param>
     /// <param name="isEnabled">Whether the rule is considered at all.</param>
     /// <param name="order">
@@ -55,7 +55,7 @@ public sealed class Rule
     /// <summary>Gets the conditions a file must match.</summary>
     public ICondition Include { get; }
 
-    /// <summary>Gets the conditions that keep a matching file out, if any.</summary>
+    /// <summary>Gets the conditions that veto this rule for a file, if any.</summary>
     public ICondition? Exclude { get; }
 
     /// <summary>Gets whether the rule is considered when files are evaluated.</summary>
@@ -88,8 +88,8 @@ public sealed class Rule
         }
 
         // Exclusion first: a definite exclusion settles the rule whatever the
-        // inclusion conditions would have said, so there is no reason to run
-        // them.
+        // inclusion conditions would have said. Excluded records that veto; it
+        // does not imply that inclusion was evaluated or matched.
         ConditionResult excluded = Exclude is null
             ? ConditionResult.NoMatch
             : Exclude.Evaluate(file, context);

@@ -15,8 +15,8 @@ public sealed class RuleSetEvaluation
     {
         Outcome = outcome;
         DecidingRule = decidingRule;
-        Evaluations = evaluations;
-        Problems = problems;
+        Evaluations = Array.AsReadOnly(evaluations.ToArray());
+        Problems = Array.AsReadOnly(problems.ToArray());
     }
 
     /// <summary>Gets what the rule set concluded.</summary>

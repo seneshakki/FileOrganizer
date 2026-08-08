@@ -36,8 +36,8 @@ public sealed class SizeConditionTests
         SizeCondition condition = new(comparisonOperator, Threshold);
 
         Assert.Equal(
-            expected,
-            condition.Evaluate(TestFiles.Create(sizeInBytes: fileSize), Context).IsMatch);
+            expected ? MatchOutcome.Match : MatchOutcome.NoMatch,
+            condition.Evaluate(TestFiles.Create(sizeInBytes: fileSize), Context).Outcome);
     }
 
     [Fact]
@@ -79,6 +79,9 @@ public sealed class SizeConditionTests
         SizeCondition condition = new((ComparisonOperator)99, 1000);
 
         Assert.False(condition.IsValid);
+        Assert.Equal(
+            EvaluationProblemKind.InvalidConfiguration,
+            Assert.Single(condition.Validate()).Kind);
         Assert.Equal(
             MatchOutcome.Indeterminate,
             condition.Evaluate(TestFiles.Create(), Context).Outcome);

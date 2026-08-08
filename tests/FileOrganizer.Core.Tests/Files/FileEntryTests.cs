@@ -95,7 +95,12 @@ public sealed class FileEntryTests
         // Some platforms do not record when a file was created. The absence has
         // to survive into the model, because substituting any real timestamp
         // would let a date rule act on a number nobody measured.
-        FileEntry entry = new("/inbox/report.pdf", "report.pdf", 1024, null, SampleInstant);
+        FileEntry entry = new(
+            TestFiles.FullPathFor("report.pdf"),
+            "report.pdf",
+            1024,
+            null,
+            SampleInstant);
 
         Assert.Null(entry.CreatedUtc);
     }
@@ -103,12 +108,13 @@ public sealed class FileEntryTests
     [Fact]
     public void KeepsTheValuesItWasGiven()
     {
+        string fullPath = TestFiles.FullPathFor(Path.Combine("quarterly", "report.pdf"));
         FileEntry entry = CreateEntry(
-            fullPath: "/inbox/quarterly/report.pdf",
+            fullPath: fullPath,
             name: "report.pdf",
             sizeInBytes: 4096);
 
-        Assert.Equal("/inbox/quarterly/report.pdf", entry.FullPath);
+        Assert.Equal(fullPath, entry.FullPath);
         Assert.Equal("report.pdf", entry.Name);
         Assert.Equal(4096, entry.SizeInBytes);
     }
@@ -138,9 +144,55 @@ public sealed class FileEntryTests
     }
 
     [Fact]
+    public void RejectsAPathThatIsNotFullyQualified()
+    {
+        Assert.Throws<ArgumentException>(
+            () => CreateEntry(fullPath: Path.Combine("inbox", "report.pdf")));
+    }
+
+    [Fact]
+    public void RejectsANameWithADirectoryPart()
+    {
+        Assert.Throws<ArgumentException>(
+            () => CreateEntry(name: Path.Combine("nested", "report.pdf")));
+    }
+
+    [Theory]
+    [InlineData(".")]
+    [InlineData("..")]
+    public void RejectsSpecialDirectoryNames(string name)
+    {
+        Assert.Throws<ArgumentException>(() => CreateEntry(name: name));
+    }
+
+    [Fact]
+    public void RejectsANameThatDoesNotMatchThePath()
+    {
+        Assert.Throws<ArgumentException>(
+            () => CreateEntry(
+                name: "other.pdf",
+                fullPath: TestFiles.FullPathFor("report.pdf")));
+    }
+
+    [Fact]
+    public void RejectsNullCharactersThatNoFileSystemCanRepresent()
+    {
+        Assert.Throws<ArgumentException>(
+            () => CreateEntry(fullPath: TestFiles.FullPathFor("report.pdf") + "\0"));
+        Assert.Throws<ArgumentException>(
+            () => CreateEntry(name: "report\0.pdf"));
+    }
+
+    [Fact]
     public void RejectsNullName()
     {
-        Assert.Throws<ArgumentNullException>(() => CreateEntry(name: null!));
+        Assert.Throws<ArgumentNullException>(
+            () => new FileEntry(
+                TestFiles.FullPathFor("report.pdf"),
+                null!,
+                1024,
+                SampleInstant,
+                SampleInstant));
     }
 
     [Fact]
@@ -168,7 +220,7 @@ public sealed class FileEntryTests
         DateTimeOffset createdAt = created ?? SampleInstant;
 
         return new FileEntry(
-            fullPath ?? "/inbox/" + name,
+            fullPath ?? TestFiles.FullPathFor(name),
             name,
             sizeInBytes,
             createdAt,
