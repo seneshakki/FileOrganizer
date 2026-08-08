@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The domain layer. It has no NuGet dependencies, performs no I/O and knows
+    nothing about Avalonia or any operating system, so it can be tested in
+    isolation and stays portable to macOS and Linux.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+</Project>

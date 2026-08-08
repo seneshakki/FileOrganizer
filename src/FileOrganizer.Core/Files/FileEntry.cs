@@ -1,0 +1,105 @@
+namespace FileOrganizer.Core.Files;
+
+/// <summary>
+/// An immutable snapshot of a single file, taken at one point in time.
+/// </summary>
+/// <remarks>
+/// Rule matching and operation planning work exclusively on snapshots. That
+/// keeps them deterministic and free of file system access, but it also means
+/// a snapshot can be stale by the time an operation actually runs. Whoever
+/// executes an operation is responsible for re-verifying the file first.
+/// </remarks>
+public sealed class FileEntry
+{
+    /// <summary>
+    /// Creates a snapshot of a file.
+    /// </summary>
+    /// <param name="fullPath">
+    /// Absolute path of the file in the host platform's own format.
+    /// </param>
+    /// <param name="name">
+    /// File name including its extension, with no directory part.
+    /// </param>
+    /// <param name="sizeInBytes">Size of the file in bytes.</param>
+    /// <param name="created">Creation timestamp reported by the file system.</param>
+    /// <param name="modified">Last write timestamp reported by the file system.</param>
+    public FileEntry(
+        string fullPath,
+        string name,
+        long sizeInBytes,
+        DateTimeOffset created,
+        DateTimeOffset modified)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(fullPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentOutOfRangeException.ThrowIfNegative(sizeInBytes);
+
+        FullPath = fullPath;
+        Name = name;
+        SizeInBytes = sizeInBytes;
+
+        // Normalized on the way in, so a rule comparing dates can never depend
+        // on the time zone of the machine that took the snapshot.
+        CreatedUtc = created.ToUniversalTime();
+        ModifiedUtc = modified.ToUniversalTime();
+
+        int extensionStart = FindExtensionStart(name);
+        if (extensionStart < 0)
+        {
+            NameWithoutExtension = name;
+            Extension = string.Empty;
+        }
+        else
+        {
+            NameWithoutExtension = name[..extensionStart];
+            Extension = name[extensionStart..];
+        }
+    }
+
+    /// <summary>Gets the absolute path of the file.</summary>
+    public string FullPath { get; }
+
+    /// <summary>Gets the file name including its extension.</summary>
+    public string Name { get; }
+
+    /// <summary>
+    /// Gets the file name without its extension, or the whole name when the
+    /// file has no extension.
+    /// </summary>
+    public string NameWithoutExtension { get; }
+
+    /// <summary>
+    /// Gets the extension including its leading dot (for example
+    /// <c>.txt</c>), or an empty string when the file has no extension.
+    /// </summary>
+    public string Extension { get; }
+
+    /// <summary>Gets the size of the file in bytes.</summary>
+    public long SizeInBytes { get; }
+
+    /// <summary>Gets the creation timestamp in UTC.</summary>
+    public DateTimeOffset CreatedUtc { get; }
+
+    /// <summary>Gets the last write timestamp in UTC.</summary>
+    public DateTimeOffset ModifiedUtc { get; }
+
+    /// <summary>
+    /// Returns the index of the dot that starts the extension, or <c>-1</c>
+    /// when the name has no extension.
+    /// </summary>
+    /// <remarks>
+    /// Two deliberate deviations from <see cref="Path.GetExtension(string)"/>:
+    /// a leading dot never starts an extension, so <c>.gitignore</c> is a
+    /// dotfile rather than a "gitignore" file; and a trailing dot does not
+    /// either, so <c>report.</c> has no extension. Both cases would otherwise
+    /// route files into surprising destination folders.
+    /// </remarks>
+    private static int FindExtensionStart(string name)
+    {
+        int lastDot = name.LastIndexOf('.');
+        bool isLeadingDot = lastDot <= 0;
+        bool isTrailingDot = lastDot == name.Length - 1;
+
+        return isLeadingDot || isTrailingDot ? -1 : lastDot;
+    }
+}
