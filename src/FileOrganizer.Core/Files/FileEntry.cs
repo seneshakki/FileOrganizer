@@ -21,13 +21,16 @@ public sealed class FileEntry
     /// File name including its extension, with no directory part.
     /// </param>
     /// <param name="sizeInBytes">Size of the file in bytes.</param>
-    /// <param name="created">Creation timestamp reported by the file system.</param>
+    /// <param name="created">
+    /// Creation timestamp reported by the file system, or <see langword="null"/>
+    /// when the file system did not report a trustworthy one.
+    /// </param>
     /// <param name="modified">Last write timestamp reported by the file system.</param>
     public FileEntry(
         string fullPath,
         string name,
         long sizeInBytes,
-        DateTimeOffset created,
+        DateTimeOffset? created,
         DateTimeOffset modified)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(fullPath);
@@ -40,7 +43,7 @@ public sealed class FileEntry
 
         // Normalized on the way in, so a rule comparing dates can never depend
         // on the time zone of the machine that took the snapshot.
-        CreatedUtc = created.ToUniversalTime();
+        CreatedUtc = created?.ToUniversalTime();
         ModifiedUtc = modified.ToUniversalTime();
 
         int extensionStart = FindExtensionStart(name);
@@ -77,8 +80,17 @@ public sealed class FileEntry
     /// <summary>Gets the size of the file in bytes.</summary>
     public long SizeInBytes { get; }
 
-    /// <summary>Gets the creation timestamp in UTC.</summary>
-    public DateTimeOffset CreatedUtc { get; }
+    /// <summary>
+    /// Gets the creation timestamp in UTC, or <see langword="null"/> when the
+    /// file system did not report one that can be trusted.
+    /// </summary>
+    /// <remarks>
+    /// Not every platform records when a file was created. A rule that asks
+    /// about creation time therefore has to cope with not being answered, so
+    /// the absence is part of the model rather than a sentinel value that
+    /// silently compares as very old.
+    /// </remarks>
+    public DateTimeOffset? CreatedUtc { get; }
 
     /// <summary>Gets the last write timestamp in UTC.</summary>
     public DateTimeOffset ModifiedUtc { get; }

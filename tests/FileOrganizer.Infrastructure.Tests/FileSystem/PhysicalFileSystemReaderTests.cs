@@ -79,6 +79,22 @@ public sealed class PhysicalFileSystemReaderTests
     }
 
     [Fact]
+    public void ReportsACreationTimeWhereThePlatformRecordsOne()
+    {
+        Assert.SkipWhen(
+            OperatingSystem.IsLinux(),
+            "Linux cannot be trusted to report a creation time, so none is reported.");
+
+        using TemporaryDirectory temp = TemporaryDirectory.Create();
+        temp.WriteFile("report.pdf", "12345");
+
+        FileEntry entry = Assert.Single(_reader.EnumerateFiles(temp.FullPath, recursive: false));
+
+        Assert.NotNull(entry.CreatedUtc);
+        Assert.Equal(TimeSpan.Zero, entry.CreatedUtc.Value.Offset);
+    }
+
+    [Fact]
     public void SkipsHiddenFiles()
     {
         Assert.SkipUnless(

@@ -78,12 +78,26 @@ public sealed class FileEntryTests
             created: createdInLocalOffset,
             modified: createdInLocalOffset);
 
-        Assert.Equal(TimeSpan.Zero, entry.CreatedUtc.Offset);
+        Assert.NotNull(entry.CreatedUtc);
+        DateTimeOffset createdUtc = entry.CreatedUtc.Value;
+
+        Assert.Equal(TimeSpan.Zero, createdUtc.Offset);
         Assert.Equal(TimeSpan.Zero, entry.ModifiedUtc.Offset);
-        Assert.Equal(6, entry.CreatedUtc.Hour);
+        Assert.Equal(6, createdUtc.Hour);
 
         // Normalizing must not shift the instant, only its representation.
-        Assert.Equal(createdInLocalOffset, entry.CreatedUtc);
+        Assert.Equal(createdInLocalOffset, createdUtc);
+    }
+
+    [Fact]
+    public void KeepsAnUnreportedCreationTimeAsUnknown()
+    {
+        // Some platforms do not record when a file was created. The absence has
+        // to survive into the model, because substituting any real timestamp
+        // would let a date rule act on a number nobody measured.
+        FileEntry entry = new("/inbox/report.pdf", "report.pdf", 1024, null, SampleInstant);
+
+        Assert.Null(entry.CreatedUtc);
     }
 
     [Fact]

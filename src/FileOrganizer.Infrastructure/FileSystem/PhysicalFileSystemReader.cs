@@ -90,14 +90,11 @@ public sealed class PhysicalFileSystemReader : IFileSystemReader
         {
             FileInfo info = new(path);
 
-            // CreationTimeUtc is not meaningful on every platform: Linux file
-            // systems commonly report the inode change time or a placeholder.
-            // Rules built on creation dates need to account for that.
             return new FileEntry(
                 info.FullName,
                 info.Name,
                 info.Length,
-                new DateTimeOffset(info.CreationTimeUtc),
+                ReadCreationTime(info),
                 new DateTimeOffset(info.LastWriteTimeUtc));
         }
         catch (IOException)
@@ -110,4 +107,20 @@ public sealed class PhysicalFileSystemReader : IFileSystemReader
             return null;
         }
     }
+
+    /// <summary>
+    /// Returns the creation timestamp, or <see langword="null"/> where the
+    /// platform cannot be trusted to report one.
+    /// </summary>
+    /// <remarks>
+    /// Windows records a creation time on NTFS, and macOS records st_birthtime,
+    /// so both are reported as given. Linux only has a birth time on file
+    /// systems and kernels that support statx; where it is missing, .NET
+    /// substitutes a value derived from the change or write time. Managed code
+    /// cannot tell the two apart, so rather than hand a rule a "creation date"
+    /// that is quietly the modification date, Linux reports no creation time at
+    /// all and conditions about it resolve as undetermined.
+    /// </remarks>
+    private static DateTimeOffset? ReadCreationTime(FileInfo info) =>
+        OperatingSystem.IsLinux() ? null : new DateTimeOffset(info.CreationTimeUtc);
 }
