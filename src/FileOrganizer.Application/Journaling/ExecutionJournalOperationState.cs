@@ -1,4 +1,4 @@
-using FileOrganizer.Application.Execution;
+using FileOrganizer.Core.Physical;
 
 namespace FileOrganizer.Application.Journaling;
 
@@ -10,7 +10,7 @@ public sealed class ExecutionJournalOperationState
         JournalOperationStatus status,
         long? lastRecordSequence,
         JournalRecordReasonKind reason,
-        EntryIdentity? expectedEntryIdentity)
+        PhysicalEntryIdentity? expectedEntryIdentity)
     {
         Ordinal = ordinal;
         Status = status;
@@ -31,5 +31,5 @@ public sealed class ExecutionJournalOperationState
     /// Gets the identity durably captured by the latest intent for this move.
     /// It remains available after resolution so recovery replay is repeatable.
     /// </summary>
-    public EntryIdentity? ExpectedEntryIdentity { get; }
+    public PhysicalEntryIdentity? ExpectedEntryIdentity { get; }
 }

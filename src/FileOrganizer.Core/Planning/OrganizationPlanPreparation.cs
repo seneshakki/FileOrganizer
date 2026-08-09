@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
 using FileOrganizer.Core.Scanning;
 
 namespace FileOrganizer.Core.Planning;
@@ -19,6 +20,7 @@ public sealed class OrganizationPlanPreparation
     internal OrganizationPlanPreparation(
         DateTimeOffset generatedAtUtc,
         CanonicalPath sourceRoot,
+        PhysicalEntryIdentity? sourceRootPhysicalIdentity,
         bool isScanComplete,
         IEnumerable<ScanDiagnostic> scanDiagnostics,
         PathPolicy pathPolicy,
@@ -37,6 +39,7 @@ public sealed class OrganizationPlanPreparation
 
         GeneratedAtUtc = generatedAtUtc.ToUniversalTime();
         SourceRoot = sourceRoot;
+        SourceRootPhysicalIdentity = sourceRootPhysicalIdentity;
         IsScanComplete = isScanComplete;
         IsSourceRootCompatible = sourceRoot.Semantics == pathPolicy.Semantics;
         PathSemantics = pathPolicy.Semantics;
@@ -55,6 +58,9 @@ public sealed class OrganizationPlanPreparation
 
     /// <summary>Gets the canonical root declared by the source scan.</summary>
     public CanonicalPath SourceRoot { get; }
+
+    /// <summary>Gets the strong identity captured for the source root.</summary>
+    public PhysicalEntryIdentity? SourceRootPhysicalIdentity { get; }
 
     /// <summary>Gets whether the source scan accounted for its whole scope.</summary>
     public bool IsScanComplete { get; }

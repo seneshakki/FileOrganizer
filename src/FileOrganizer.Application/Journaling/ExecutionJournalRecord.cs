@@ -1,4 +1,5 @@
 using FileOrganizer.Application.Execution;
+using FileOrganizer.Core.Physical;
 
 namespace FileOrganizer.Application.Journaling;
 
@@ -14,7 +15,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
         DateTimeOffset recordedAtUtc,
         ExecutionJournalRecordKind kind,
         int? operationOrdinal,
-        EntryIdentity? expectedEntryIdentity,
+        PhysicalEntryIdentity? expectedEntryIdentity,
         JournalRecordReasonKind reason)
     {
         ArgumentNullException.ThrowIfNull(fingerprint);
@@ -57,6 +58,14 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
         {
             throw new ArgumentException(
                 "Only a move intent must durably retain its expected entry identity.",
+                nameof(expectedEntryIdentity));
+        }
+
+        if (expectedEntryIdentity is not null
+            && expectedEntryIdentity.EntryKind != PhysicalEntryKind.RegularFile)
+        {
+            throw new ArgumentException(
+                "A move intent must retain a regular-file physical identity.",
                 nameof(expectedEntryIdentity));
         }
 
@@ -103,7 +112,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
     /// Gets the strong identity observed immediately before a move intent was
     /// published. It is null for every other record kind.
     /// </summary>
-    public EntryIdentity? ExpectedEntryIdentity { get; }
+    public PhysicalEntryIdentity? ExpectedEntryIdentity { get; }
 
     public JournalRecordReasonKind Reason { get; }
 
@@ -125,7 +134,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
         long sequence,
         DateTimeOffset recordedAtUtc,
         int operationOrdinal,
-        EntryIdentity expectedEntryIdentity) =>
+        PhysicalEntryIdentity expectedEntryIdentity) =>
         new(
             fingerprint,
             sequence,

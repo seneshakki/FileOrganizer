@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using FileOrganizer.Application.Execution;
+using FileOrganizer.Core.Physical;
 
 namespace FileOrganizer.Application.Journaling;
 
@@ -428,13 +429,13 @@ public static class ExecutionJournalStateMachine
 
         public JournalRecordReasonKind Reason { get; private set; }
 
-        public EntryIdentity? ExpectedEntryIdentity { get; private set; }
+        public PhysicalEntryIdentity? ExpectedEntryIdentity { get; private set; }
 
         public void Set(
             JournalOperationStatus status,
             long recordSequence,
             JournalRecordReasonKind reason,
-            EntryIdentity? expectedEntryIdentity = null)
+            PhysicalEntryIdentity? expectedEntryIdentity = null)
         {
             Status = status;
             LastRecordSequence = recordSequence;

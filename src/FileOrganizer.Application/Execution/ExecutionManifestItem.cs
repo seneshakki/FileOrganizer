@@ -1,5 +1,6 @@
 using FileOrganizer.Core.Actions;
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
 using FileOrganizer.Core.Planning;
 
 namespace FileOrganizer.Application.Execution;
@@ -13,6 +14,7 @@ public sealed class ExecutionManifestItem
         int ordinal,
         SourcePrecondition sourcePrecondition,
         CanonicalPath destinationDirectory,
+        PhysicalEntryIdentity destinationDirectoryPhysicalIdentity,
         CanonicalPath targetPath,
         string selectedRuleName,
         int selectedRuleOrder)
@@ -20,6 +22,7 @@ public sealed class ExecutionManifestItem
         ArgumentOutOfRangeException.ThrowIfNegative(ordinal);
         ArgumentNullException.ThrowIfNull(sourcePrecondition);
         ArgumentNullException.ThrowIfNull(destinationDirectory);
+        ArgumentNullException.ThrowIfNull(destinationDirectoryPhysicalIdentity);
         ArgumentNullException.ThrowIfNull(targetPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(selectedRuleName);
 
@@ -31,9 +34,24 @@ public sealed class ExecutionManifestItem
                 nameof(targetPath));
         }
 
+        if (sourcePrecondition.PhysicalIdentity is null)
+        {
+            throw new ArgumentException(
+                "A manifest source must retain strong physical identity.",
+                nameof(sourcePrecondition));
+        }
+
+        if (destinationDirectoryPhysicalIdentity.EntryKind != PhysicalEntryKind.Directory)
+        {
+            throw new ArgumentException(
+                "The destination identity must identify a directory.",
+                nameof(destinationDirectoryPhysicalIdentity));
+        }
+
         Ordinal = ordinal;
         SourcePrecondition = sourcePrecondition;
         DestinationDirectory = destinationDirectory;
+        DestinationDirectoryPhysicalIdentity = destinationDirectoryPhysicalIdentity;
         TargetPath = targetPath;
         SelectedRuleName = selectedRuleName;
         SelectedRuleOrder = selectedRuleOrder;
@@ -47,6 +65,9 @@ public sealed class ExecutionManifestItem
 
     /// <summary>Gets the existing directory that must be revalidated before execution.</summary>
     public CanonicalPath DestinationDirectory { get; }
+
+    /// <summary>Gets the destination directory identity captured during planning.</summary>
+    public PhysicalEntryIdentity DestinationDirectoryPhysicalIdentity { get; }
 
     /// <summary>Gets the exact no-overwrite target path.</summary>
     public CanonicalPath TargetPath { get; }

@@ -1,4 +1,4 @@
-using FileOrganizer.Application.Execution;
+using FileOrganizer.Core.Physical;
 
 namespace FileOrganizer.Application.Recovery;
 
@@ -7,7 +7,7 @@ public sealed class RecoveryEntryObservation
 {
     private RecoveryEntryObservation(
         RecoveryEntryObservationKind kind,
-        EntryIdentity? identity,
+        PhysicalEntryIdentity? identity,
         RecoveryInspectionFailureKind? failureKind)
     {
         Kind = kind;
@@ -17,14 +17,14 @@ public sealed class RecoveryEntryObservation
 
     public RecoveryEntryObservationKind Kind { get; }
 
-    public EntryIdentity? Identity { get; }
+    public PhysicalEntryIdentity? Identity { get; }
 
     public RecoveryInspectionFailureKind? FailureKind { get; }
 
     public static RecoveryEntryObservation Missing() =>
         new(RecoveryEntryObservationKind.Missing, null, null);
 
-    public static RecoveryEntryObservation Present(EntryIdentity identity)
+    public static RecoveryEntryObservation Present(PhysicalEntryIdentity identity)
     {
         ArgumentNullException.ThrowIfNull(identity);
         return new(RecoveryEntryObservationKind.Present, identity, null);

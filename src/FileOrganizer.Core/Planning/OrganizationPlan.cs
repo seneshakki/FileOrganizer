@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
 using FileOrganizer.Core.Scanning;
 
 namespace FileOrganizer.Core.Planning;
@@ -16,6 +17,7 @@ public sealed class OrganizationPlan
     internal OrganizationPlan(
         DateTimeOffset generatedAtUtc,
         CanonicalPath sourceRoot,
+        PhysicalEntryIdentity? sourceRootPhysicalIdentity,
         bool isScanComplete,
         IEnumerable<ScanDiagnostic> scanDiagnostics,
         IEnumerable<OrganizationPlanDiagnostic> diagnostics,
@@ -28,6 +30,7 @@ public sealed class OrganizationPlan
 
         GeneratedAtUtc = generatedAtUtc.ToUniversalTime();
         SourceRoot = sourceRoot;
+        SourceRootPhysicalIdentity = sourceRootPhysicalIdentity;
         IsScanComplete = isScanComplete;
         _scanDiagnostics = Snapshot(scanDiagnostics, nameof(scanDiagnostics));
         _diagnostics = Snapshot(diagnostics, nameof(diagnostics));
@@ -35,7 +38,12 @@ public sealed class OrganizationPlan
 
         IsEligibleForExecution = IsScanComplete
             && !_items.Any(item => item.Outcome is PlanItemOutcome.Blocked or PlanItemOutcome.Conflict)
-            && _diagnostics.Count == 0;
+            && _diagnostics.Count == 0
+            && SourceRootPhysicalIdentity is not null
+            && !_items.Any(
+                item => item.Outcome == PlanItemOutcome.Ready
+                    && (item.SourcePrecondition.PhysicalIdentity is null
+                        || item.DestinationDirectoryPhysicalIdentity is null));
     }
 
     /// <summary>
@@ -46,6 +54,9 @@ public sealed class OrganizationPlan
 
     /// <summary>Gets the canonical source root declared by the scan.</summary>
     public CanonicalPath SourceRoot { get; }
+
+    /// <summary>Gets the strong identity captured for the source root.</summary>
+    public PhysicalEntryIdentity? SourceRootPhysicalIdentity { get; }
 
     /// <summary>Gets whether the scanner accounted for its complete scope.</summary>
     public bool IsScanComplete { get; }

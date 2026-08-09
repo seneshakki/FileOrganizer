@@ -1,5 +1,6 @@
 using FileOrganizer.Core.Files;
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
 
 namespace FileOrganizer.Core.Tests.Files;
 
@@ -143,6 +144,35 @@ public sealed class FileEntryTests
     public void RejectsNegativeSize()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => CreateEntry(sizeInBytes: -1));
+    }
+
+    [Fact]
+    public void RetainsARegularFilePhysicalIdentity()
+    {
+        PhysicalEntryIdentity identity = TestFiles.FileIdentity("entry-1");
+
+        FileEntry entry = new(
+            TestFiles.CanonicalPathFor("report.pdf"),
+            1,
+            null,
+            SampleInstant,
+            identity);
+
+        Assert.Same(identity, entry.PhysicalIdentity);
+    }
+
+    [Fact]
+    public void RejectsADirectoryPhysicalIdentity()
+    {
+        PhysicalEntryIdentity identity = TestFiles.DirectoryIdentity("directory-1");
+
+        Assert.Throws<ArgumentException>(
+            () => new FileEntry(
+                TestFiles.CanonicalPathFor("report.pdf"),
+                1,
+                null,
+                SampleInstant,
+                identity));
     }
 
     private static FileEntry CreateEntry(

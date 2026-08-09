@@ -1,4 +1,6 @@
 using FileOrganizer.Application.Execution;
+using FileOrganizer.Application.Tests.Execution;
+using FileOrganizer.Core.Physical;
 using FileOrganizer.Application.Journaling;
 
 namespace FileOrganizer.Application.Tests.Journaling;
@@ -12,7 +14,10 @@ public sealed class ExecutionJournalRecordTests
     public void NormalizesTimestampAndUsesStructuralEquality()
     {
         PlanFingerprint fingerprint = JournalTestManifest.Create().Fingerprint;
-        EntryIdentity identity = new("test-id-v1", "volume", "entry");
+        PhysicalEntryIdentity identity = TestPhysicalIdentities.File(
+            "entry",
+            volumeIdentity: "volume",
+            scheme: "test-id-v1");
         ExecutionJournalRecord first = ExecutionJournalRecord.MoveIntent(
             fingerprint,
             1,
@@ -24,12 +29,29 @@ public sealed class ExecutionJournalRecordTests
             1,
             RecordedAt.ToUniversalTime(),
             0,
-            new EntryIdentity("test-id-v1", "volume", "entry"));
+            TestPhysicalIdentities.File(
+                "entry",
+                volumeIdentity: "volume",
+                scheme: "test-id-v1"));
 
         Assert.Equal(RecordedAt.ToUniversalTime(), first.RecordedAtUtc);
         Assert.Same(identity, first.ExpectedEntryIdentity);
         Assert.Equal(first, second);
         Assert.Equal(first.GetHashCode(), second.GetHashCode());
+    }
+
+    [Fact]
+    public void MoveIntentRejectsADirectoryIdentity()
+    {
+        ExecutionManifest manifest = JournalTestManifest.Create();
+
+        Assert.Throws<ArgumentException>(
+            () => ExecutionJournalRecord.MoveIntent(
+                manifest.Fingerprint,
+                1,
+                RecordedAt,
+                0,
+                TestPhysicalIdentities.Directory("not-a-file")));
     }
 
     [Fact]

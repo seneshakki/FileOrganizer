@@ -11,4 +11,13 @@ public enum ExecutionManifestProblemKind
 
     /// <summary>A ready item violated an execution safety invariant.</summary>
     InvalidReadyItem,
+
+    /// <summary>The scan root has no strong physical directory identity.</summary>
+    SourceRootPhysicalIdentityMissing,
+
+    /// <summary>A ready source has no strong physical file identity.</summary>
+    SourcePhysicalIdentityMissing,
+
+    /// <summary>A required destination directory has no strong physical identity.</summary>
+    DestinationDirectoryPhysicalIdentityMissing,
 }

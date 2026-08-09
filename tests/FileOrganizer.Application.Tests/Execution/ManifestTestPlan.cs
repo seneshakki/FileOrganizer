@@ -2,6 +2,7 @@ using FileOrganizer.Core.Actions;
 using FileOrganizer.Core.Files;
 using FileOrganizer.Core.Matching.Conditions;
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
 using FileOrganizer.Core.Planning;
 using FileOrganizer.Core.Rules;
 using FileOrganizer.Core.Scanning;
@@ -24,24 +25,53 @@ internal static class ManifestTestPlan
         DateTimeOffset? generatedAt = null,
         IEnumerable<string>? unmatchedSourcePaths = null,
         PathPolicy? pathPolicy = null,
-        string sourceRoot = @"C:\Inbox")
+        string sourceRoot = @"C:\Inbox",
+        bool includeSourceRootPhysicalIdentity = true,
+        bool includeSourcePhysicalIdentities = true,
+        bool includeDestinationDirectoryPhysicalIdentities = true,
+        PhysicalEntryIdentity? sourceRootPhysicalIdentity = null,
+        Func<int, PhysicalEntryIdentity>? sourcePhysicalIdentityFactory = null,
+        Func<int, PhysicalEntryIdentity>? destinationPhysicalIdentityFactory = null)
     {
         PathPolicy selectedPolicy = pathPolicy ?? Policy;
         TestOperation[] snapshot = [.. operations];
+        CanonicalPath[] operationPaths = snapshot
+            .Select(operation => Path(selectedPolicy, operation.SourcePath))
+            .ToArray();
+        CanonicalPath[] unmatchedPaths = (unmatchedSourcePaths ?? [])
+            .Select(path => Path(selectedPolicy, path))
+            .ToArray();
+        Dictionary<CanonicalPath, int> sourceOrdinals = operationPaths
+            .Concat(unmatchedPaths)
+            .OrderBy(path => path, selectedPolicy.DeterministicComparer)
+            .Distinct(selectedPolicy.LogicalComparer)
+            .Select((path, index) => (path, index))
+            .ToDictionary(
+                pair => pair.path,
+                pair => pair.index,
+                selectedPolicy.LogicalComparer);
         FileEntry[] files = snapshot
             .Select(
-                operation => new FileEntry(
-                    Path(selectedPolicy, operation.SourcePath),
+                (operation, index) => new FileEntry(
+                    operationPaths[index],
                     operation.Length,
                     operation.CreatedUtc,
-                    operation.ModifiedUtc))
+                    operation.ModifiedUtc,
+                    includeSourcePhysicalIdentities
+                        ? (sourcePhysicalIdentityFactory ?? DefaultSourceIdentity)(
+                            sourceOrdinals[operationPaths[index]])
+                        : null))
             .Concat(
-                (unmatchedSourcePaths ?? []).Select(
+                unmatchedPaths.Select(
                     path => new FileEntry(
-                        Path(selectedPolicy, path),
+                        path,
                         1,
                         created: null,
-                        GeneratedAt.AddDays(-1))))
+                        GeneratedAt.AddDays(-1),
+                        includeSourcePhysicalIdentities
+                            ? (sourcePhysicalIdentityFactory ?? DefaultSourceIdentity)(
+                                sourceOrdinals[path])
+                            : null)))
             .ToArray();
 
         OrganizationRule[] rules = snapshot
@@ -57,7 +87,10 @@ internal static class ManifestTestPlan
         FileScanResult scan = new(
             Path(selectedPolicy, sourceRoot),
             files,
-            diagnostics ?? []);
+            diagnostics ?? [],
+            includeSourceRootPhysicalIdentity
+                ? sourceRootPhysicalIdentity ?? TestPhysicalIdentities.Directory("scan-root")
+                : null);
         OrganizationPlanPreparation preparation = new OrganizationPlanner(
             new FixedTimeProvider(generatedAt ?? GeneratedAt)).Prepare(
                 scan,
@@ -67,13 +100,24 @@ internal static class ManifestTestPlan
         HashSet<CanonicalPath> directories = new(
             preparation.DestinationDirectories,
             selectedPolicy.LogicalComparer);
+        Dictionary<CanonicalPath, int> destinationOrdinals = preparation.DestinationDirectories
+            .Select((path, index) => (path, index))
+            .ToDictionary(
+                pair => pair.path,
+                pair => pair.index,
+                selectedPolicy.LogicalComparer);
         DestinationPathFact[] facts = preparation.DestinationPaths
             .Select(
                 path => new DestinationPathFact(
                     path,
                     directories.Contains(path)
                         ? DestinationEntryKind.Directory
-                        : DestinationEntryKind.Missing))
+                        : DestinationEntryKind.Missing,
+                    physicalIdentity: directories.Contains(path)
+                        && includeDestinationDirectoryPhysicalIdentities
+                            ? (destinationPhysicalIdentityFactory
+                                ?? DefaultDestinationIdentity)(destinationOrdinals[path])
+                            : null))
             .ToArray();
 
         return OrganizationPlanner.Complete(
@@ -93,6 +137,12 @@ internal static class ManifestTestPlan
         int dot = path.LastIndexOf('.');
         return dot < 0 ? ExtensionCondition.NoExtension : path[dot..];
     }
+
+    private static PhysicalEntryIdentity DefaultSourceIdentity(int ordinal) =>
+        TestPhysicalIdentities.File($"entry-{ordinal}");
+
+    private static PhysicalEntryIdentity DefaultDestinationIdentity(int ordinal) =>
+        TestPhysicalIdentities.Directory($"destination-{ordinal}");
 
     internal sealed record TestOperation(
         string SourcePath,

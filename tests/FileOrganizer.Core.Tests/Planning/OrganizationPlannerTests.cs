@@ -56,9 +56,70 @@ public sealed class OrganizationPlannerTests
         Assert.Equal(42, item.SourcePrecondition.Length);
         Assert.Equal(created, item.SourcePrecondition.CreatedUtc);
         Assert.Equal(modified, item.SourcePrecondition.ModifiedUtc);
+        Assert.NotNull(item.SourcePrecondition.PhysicalIdentity);
+        Assert.NotNull(item.DestinationDirectoryPhysicalIdentity);
+        Assert.NotNull(plan.SourceRootPhysicalIdentity);
         Assert.Empty(item.Reasons);
         Assert.Equal(Now, plan.GeneratedAtUtc);
         Assert.True(plan.IsEligibleForExecution);
+    }
+
+    [Theory]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, false)]
+    public void MissingRequiredPhysicalIdentityKeepsAReadyPreviewButDisablesExecution(
+        bool hasRootIdentity,
+        bool hasSourceIdentity,
+        bool hasDestinationIdentity)
+    {
+        CanonicalPath root = Path(Windows, @"C:\Inbox");
+        CanonicalPath sourcePath = Path(Windows, @"C:\Inbox\report.txt");
+        FileEntry source = new(
+            sourcePath,
+            1,
+            null,
+            Now.AddDays(-1),
+            hasSourceIdentity ? TestFiles.FileIdentity(sourcePath.Value) : null);
+        FileScanResult scan = new(
+            root,
+            [source],
+            [],
+            hasRootIdentity ? TestFiles.DirectoryIdentity(root.Value) : null);
+        OrganizationPlanPreparation preparation = new OrganizationPlanner(
+            new FixedTimeProvider(Now)).Prepare(
+                scan,
+                new OrganizationRuleSet(
+                    [Matching(new MoveToDirectoryAction(@"C:\Archive"))]),
+                Windows);
+        HashSet<CanonicalPath> directories = new(
+            preparation.DestinationDirectories,
+            Windows.LogicalComparer);
+        DestinationStateSnapshot destinationState = new(
+            Windows.Semantics,
+            preparation.DestinationPaths.Select(
+                path => new DestinationPathFact(
+                    path,
+                    directories.Contains(path)
+                        ? DestinationEntryKind.Directory
+                        : DestinationEntryKind.Missing,
+                    physicalIdentity: directories.Contains(path) && hasDestinationIdentity
+                        ? TestFiles.DirectoryIdentity(path.Value)
+                        : null)));
+
+        OrganizationPlan plan = OrganizationPlanner.Complete(preparation, destinationState);
+
+        OrganizationPlanItem item = Assert.Single(plan.Items);
+        Assert.Equal(PlanItemOutcome.Ready, item.Outcome);
+        Assert.Equal(
+            OrganizationPlanDiagnosticKind.StrongPhysicalIdentityUnavailable,
+            Assert.Single(plan.Diagnostics).Kind);
+        Assert.False(plan.IsEligibleForExecution);
+        Assert.Equal(hasRootIdentity, plan.SourceRootPhysicalIdentity is not null);
+        Assert.Equal(hasSourceIdentity, item.SourcePrecondition.PhysicalIdentity is not null);
+        Assert.Equal(
+            hasDestinationIdentity,
+            item.DestinationDirectoryPhysicalIdentity is not null);
     }
 
     [Fact]
@@ -248,7 +309,12 @@ public sealed class OrganizationPlannerTests
             PathSyntax.Posix,
             PathCaseSensitivity.Sensitive,
             PathUnicodeNormalization.None);
-        FileScanResult scan = new(Path(posix, "/inbox"), [], []);
+        CanonicalPath posixRoot = Path(posix, "/inbox");
+        FileScanResult scan = new(
+            posixRoot,
+            [],
+            [],
+            rootPhysicalIdentity: TestFiles.DirectoryIdentity(posixRoot.Value));
         OrganizationPlanPreparation preparation = new OrganizationPlanner(
             new FixedTimeProvider(Now)).Prepare(
                 scan,
@@ -406,7 +472,10 @@ public sealed class OrganizationPlannerTests
                 path,
                 directories.Contains(path)
                     ? DestinationEntryKind.Directory
-                    : DestinationEntryKind.Missing));
+                    : DestinationEntryKind.Missing,
+                physicalIdentity: directories.Contains(path)
+                    ? TestFiles.DirectoryIdentity(path.Value)
+                    : null));
     }
 
     private static FileScanResult Scan(
@@ -414,7 +483,11 @@ public sealed class OrganizationPlannerTests
         string root,
         IEnumerable<FileEntry> files,
         IEnumerable<ScanDiagnostic>? diagnostics = null) =>
-        new(Path(policy, root), files, diagnostics ?? []);
+        new(
+            Path(policy, root),
+            files,
+            diagnostics ?? [],
+            rootPhysicalIdentity: TestFiles.DirectoryIdentity(root));
 
     private static FileEntry Entry(
         PathPolicy policy,
@@ -422,7 +495,12 @@ public sealed class OrganizationPlannerTests
         long length = 1,
         DateTimeOffset? created = null,
         DateTimeOffset? modified = null) =>
-        new(Path(policy, path), length, created, modified ?? Now.AddDays(-1));
+        new(
+            Path(policy, path),
+            length,
+            created,
+            modified ?? Now.AddDays(-1),
+            TestFiles.FileIdentity(path));
 
     private static CanonicalPath Path(PathPolicy policy, string value) =>
         policy.CanonicalizeAbsolute(value).Path

@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using FileOrganizer.Core.Collections;
 using FileOrganizer.Core.Files;
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
 
 namespace FileOrganizer.Core.Scanning;
 
@@ -22,9 +23,42 @@ public sealed class FileScanResult
         IEnumerable<FileEntry> files,
         IEnumerable<ScanDiagnostic> diagnostics,
         CancellationToken cancellationToken = default)
+        : this(
+            canonicalRoot,
+            files,
+            diagnostics,
+            rootPhysicalIdentity: null,
+            cancellationToken)
+    {
+    }
+
+    /// <summary>Creates a scan snapshot enriched with source-root identity.</summary>
+    /// <param name="canonicalRoot">The canonical lexical source root.</param>
+    /// <param name="files">Every regular file whose metadata was read.</param>
+    /// <param name="diagnostics">Every entry that could not be accounted for.</param>
+    /// <param name="rootPhysicalIdentity">
+    /// Strong directory identity captured for the root, or <see langword="null"/>
+    /// when only a preview-safe lexical scan was available.
+    /// </param>
+    /// <param name="cancellationToken">
+    /// Stops immutable materialization and ordering without returning a partial result.
+    /// </param>
+    public FileScanResult(
+        CanonicalPath canonicalRoot,
+        IEnumerable<FileEntry> files,
+        IEnumerable<ScanDiagnostic> diagnostics,
+        PhysicalEntryIdentity? rootPhysicalIdentity,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(canonicalRoot);
         cancellationToken.ThrowIfCancellationRequested();
+
+        if (rootPhysicalIdentity?.EntryKind is not (null or PhysicalEntryKind.Directory))
+        {
+            throw new ArgumentException(
+                "A scan root can retain only a directory physical identity.",
+                nameof(rootPhysicalIdentity));
+        }
 
         FileEntry[] fileSnapshot = CancellationAwareCollection.Snapshot(
             files,
@@ -51,6 +85,7 @@ public sealed class FileScanResult
 
         cancellationToken.ThrowIfCancellationRequested();
         CanonicalRoot = canonicalRoot;
+        RootPhysicalIdentity = rootPhysicalIdentity;
         _files = Array.AsReadOnly(fileSnapshot);
         _diagnostics = Array.AsReadOnly(diagnosticSnapshot);
         cancellationToken.ThrowIfCancellationRequested();
@@ -58,6 +93,12 @@ public sealed class FileScanResult
 
     /// <summary>Gets the canonical source root.</summary>
     public CanonicalPath CanonicalRoot { get; }
+
+    /// <summary>
+    /// Gets the path-independent identity of the scanned root directory, or
+    /// <see langword="null"/> when it was not established.
+    /// </summary>
+    public PhysicalEntryIdentity? RootPhysicalIdentity { get; }
 
     /// <summary>Gets files in the path policy's deterministic total order.</summary>
     public IReadOnlyList<FileEntry> Files => _files;
@@ -106,9 +147,17 @@ public sealed class FileScanResult
             }
 
             int created = Nullable.Compare(left.CreatedUtc, right.CreatedUtc);
-            return created != 0
-                ? created
-                : left.ModifiedUtc.CompareTo(right.ModifiedUtc);
+            if (created != 0)
+            {
+                return created;
+            }
+
+            int modified = left.ModifiedUtc.CompareTo(right.ModifiedUtc);
+            return modified != 0
+                ? modified
+                : PhysicalEntryIdentityOrdering.Compare(
+                    left.PhysicalIdentity,
+                    right.PhysicalIdentity);
         }
     }
 

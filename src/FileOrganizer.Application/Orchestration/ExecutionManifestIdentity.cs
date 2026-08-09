@@ -14,6 +14,7 @@ internal static class ExecutionManifestIdentity
 
         if (!left.Fingerprint.Equals(right.Fingerprint)
             || left.PathSemantics != right.PathSemantics
+            || !left.SourceRootPhysicalIdentity.Equals(right.SourceRootPhysicalIdentity)
             || left.Items.Count != right.Items.Count)
         {
             return false;
@@ -38,6 +39,10 @@ internal static class ExecutionManifestIdentity
                 || first.SourcePrecondition.Length != second.SourcePrecondition.Length
                 || first.SourcePrecondition.CreatedUtc != second.SourcePrecondition.CreatedUtc
                 || first.SourcePrecondition.ModifiedUtc != second.SourcePrecondition.ModifiedUtc
+                || !first.SourcePrecondition.PhysicalIdentity!.Equals(
+                    second.SourcePrecondition.PhysicalIdentity)
+                || !first.DestinationDirectoryPhysicalIdentity.Equals(
+                    second.DestinationDirectoryPhysicalIdentity)
                 || !policy.AreEquivalent(
                     first.SourcePrecondition.CanonicalPath,
                     second.SourcePrecondition.CanonicalPath)

@@ -1,4 +1,5 @@
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
 
 namespace FileOrganizer.Core.Files;
 
@@ -35,7 +36,8 @@ public sealed class FileEntry
         CanonicalPath path,
         long sizeInBytes,
         DateTimeOffset? created,
-        DateTimeOffset modified)
+        DateTimeOffset modified,
+        PhysicalEntryIdentity? physicalIdentity = null)
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentOutOfRangeException.ThrowIfNegative(sizeInBytes);
@@ -45,9 +47,17 @@ public sealed class FileEntry
             throw new ArgumentException("A file path must include a file name.", nameof(path));
         }
 
+        if (physicalIdentity?.EntryKind is not (null or PhysicalEntryKind.RegularFile))
+        {
+            throw new ArgumentException(
+                "A file snapshot can retain only a regular-file physical identity.",
+                nameof(physicalIdentity));
+        }
+
         Path = path;
         Name = path.FileName!;
         SizeInBytes = sizeInBytes;
+        PhysicalIdentity = physicalIdentity;
 
         // Normalized on the way in, so a rule comparing dates can never depend
         // on the time zone of the machine that took the snapshot.
@@ -90,6 +100,12 @@ public sealed class FileEntry
 
     /// <summary>Gets the size of the file in bytes.</summary>
     public long SizeInBytes { get; }
+
+    /// <summary>
+    /// Gets the path-independent physical identity captured with this snapshot,
+    /// or <see langword="null"/> when the producer could not establish it.
+    /// </summary>
+    public PhysicalEntryIdentity? PhysicalIdentity { get; }
 
     /// <summary>
     /// Gets the creation timestamp in UTC, or <see langword="null"/> when the

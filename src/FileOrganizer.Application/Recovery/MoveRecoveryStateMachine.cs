@@ -1,6 +1,6 @@
 using System.Diagnostics;
-using FileOrganizer.Application.Execution;
 using FileOrganizer.Application.Journaling;
+using FileOrganizer.Core.Physical;
 
 namespace FileOrganizer.Application.Recovery;
 
@@ -11,7 +11,7 @@ namespace FileOrganizer.Application.Recovery;
 public static class MoveRecoveryStateMachine
 {
     public static RecoveryResolution Classify(
-        EntryIdentity expectedIdentity,
+        PhysicalEntryIdentity expectedIdentity,
         RecoveryEntryObservation source,
         RecoveryEntryObservation target)
     {
@@ -82,7 +82,7 @@ public static class MoveRecoveryStateMachine
             ? journalState.Operations.Single(candidate => candidate.Ordinal == ordinal)
             : journalState.Operations.LastOrDefault(
                 candidate => candidate.Status != JournalOperationStatus.NotStarted);
-        EntryIdentity expectedIdentity = operation?.ExpectedEntryIdentity
+        PhysicalEntryIdentity expectedIdentity = operation?.ExpectedEntryIdentity
             ?? throw new InvalidOperationException(
                 "The journal has no durable move-intent identity to recover.");
         RecoveryResolution resolution = Classify(expectedIdentity, source, target);
@@ -179,7 +179,7 @@ public static class MoveRecoveryStateMachine
 
     private static bool IsExpected(
         RecoveryEntryObservation observation,
-        EntryIdentity expectedIdentity) =>
+        PhysicalEntryIdentity expectedIdentity) =>
         observation.Kind == RecoveryEntryObservationKind.Present
         && observation.Identity!.Equals(expectedIdentity);
 

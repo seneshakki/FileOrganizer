@@ -3,6 +3,7 @@ using FileOrganizer.Application.Journaling;
 using FileOrganizer.Application.Orchestration;
 using FileOrganizer.Application.Tests.Execution;
 using FileOrganizer.Core.Actions;
+using FileOrganizer.Core.Physical;
 using FileOrganizer.Core.Planning;
 
 namespace FileOrganizer.Application.Tests.Orchestration;
@@ -75,6 +76,32 @@ public sealed class OrganizationPlanExecutorTests
     }
 
     [Fact]
+    public async Task IdentityDeficientPreviewIsRejectedBeforeAnyExecutionPort()
+    {
+        OrganizationPlan plan = ManifestTestPlan.Create(
+        [
+            new ManifestTestPlan.TestOperation(
+                @"C:\Inbox\preview.txt",
+                new MoveToDirectoryAction(@"C:\Sorted\Text"),
+                "move"),
+        ],
+            includeSourcePhysicalIdentities: false);
+        Harness context = new();
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.Rejected, result.Outcome);
+        Assert.Null(result.Manifest);
+        Assert.Equal(
+            ExecutionManifestProblemKind.SourcePhysicalIdentityMissing,
+            Assert.Single(result.ManifestProblems).Kind);
+        Assert.Equal(0, context.GlobalLease.AcquisitionCount);
+        Assert.Equal(0, context.Preflight.CallCount);
+        Assert.Equal(0, context.Journal.BeginCount);
+        Assert.Empty(context.Moves.AcquiredOrdinals);
+    }
+
+    [Fact]
     public async Task ImmediateRevalidationFailureStopsAfterTheAppliedPrefix()
     {
         OrganizationPlan plan = Plan(3);
@@ -95,6 +122,70 @@ public sealed class OrganizationPlanExecutorTests
         Assert.Equal(
             ExecutionJournalRecordKind.ExecutionStopped,
             context.Journal.Records(result.Fingerprint!)[^1].Kind);
+    }
+
+    [Fact]
+    public async Task SourceIdentityMismatchStopsBeforeMoveIntentOrCommit()
+    {
+        OrganizationPlan plan = Plan(1);
+        Harness context = new();
+        context.Moves[0].Identity = TestPhysicalIdentities.File("different-source");
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.Stopped, result.Outcome);
+        Assert.Equal(ExecutionItemOutcome.Blocked, Assert.Single(result.Items).Outcome);
+        Assert.Equal(
+            ExecutionProblemKind.SourceRevalidationFailed,
+            Assert.Single(result.Problems).Kind);
+        Assert.Empty(context.Moves.CommittedOrdinals);
+        Assert.Equal(
+            [
+                ExecutionJournalRecordKind.ExecutionStarted,
+                ExecutionJournalRecordKind.ExecutionStopped,
+            ],
+            context.Journal.Records(result.Fingerprint!).Select(record => record.Kind));
+    }
+
+    [Fact]
+    public async Task DestinationDirectoryIdentityMismatchStopsBeforeMoveIntentOrCommit()
+    {
+        OrganizationPlan plan = Plan(1);
+        Harness context = new();
+        context.Moves[0].DestinationDirectoryIdentityOverride =
+            TestPhysicalIdentities.Directory("different-destination");
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.Stopped, result.Outcome);
+        Assert.Equal(ExecutionItemOutcome.Blocked, Assert.Single(result.Items).Outcome);
+        Assert.Equal(
+            ExecutionProblemKind.DestinationRevalidationFailed,
+            Assert.Single(result.Problems).Kind);
+        Assert.Empty(context.Moves.CommittedOrdinals);
+        Assert.Equal(
+            [
+                ExecutionJournalRecordKind.ExecutionStarted,
+                ExecutionJournalRecordKind.ExecutionStopped,
+            ],
+            context.Journal.Records(result.Fingerprint!).Select(record => record.Kind));
+    }
+
+    [Fact]
+    public async Task MoveIntentRetainsTheManifestSourceIdentityAfterLeaseValidation()
+    {
+        OrganizationPlan plan = Plan(1);
+        ExecutionManifest manifest = Compile(plan);
+        Harness context = new();
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+
+        ExecutionJournalRecord intent = Assert.Single(
+            context.Journal.Records(result.Fingerprint!),
+            record => record.Kind == ExecutionJournalRecordKind.MoveIntent);
+        Assert.Same(
+            Assert.Single(manifest.Items).SourcePrecondition.PhysicalIdentity,
+            intent.ExpectedEntryIdentity);
     }
 
     [Fact]
@@ -400,7 +491,10 @@ public sealed class OrganizationPlanExecutorTests
         OrganizationPlan plan = Plan(2);
         ExecutionManifest manifest = Compile(plan);
         Harness context = new();
-        EntryIdentity identity = new("test", "volume", "durable-first");
+        PhysicalEntryIdentity identity = TestPhysicalIdentities.File(
+            "durable-first",
+            volumeIdentity: "volume",
+            scheme: "test");
         context.Journal.Seed(
             manifest,
             [

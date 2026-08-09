@@ -2,6 +2,8 @@ using FileOrganizer.Application.Execution;
 using FileOrganizer.Application.Journaling;
 using FileOrganizer.Application.Orchestration;
 using FileOrganizer.Application.Recovery;
+using FileOrganizer.Application.Tests.Execution;
+using FileOrganizer.Core.Physical;
 
 namespace FileOrganizer.Application.Tests.Orchestration;
 
@@ -280,7 +282,7 @@ internal sealed class ScriptedMovePort : IMoveOperationPort, IRecoveryObservatio
         ScriptedMoveStep step = this[item.Ordinal];
         return ValueTask.FromResult(
             step.AcquisitionProblem is null
-                ? MoveLeaseAcquisition.Ready(new Lease(this, step))
+                ? MoveLeaseAcquisition.Ready(new Lease(this, step, item))
                 : step.AcquisitionReadiness == ExecutionReadiness.Conflict
                     ? MoveLeaseAcquisition.Conflict(step.AcquisitionProblem)
                     : MoveLeaseAcquisition.Blocked(step.AcquisitionProblem));
@@ -300,9 +302,14 @@ internal sealed class ScriptedMovePort : IMoveOperationPort, IRecoveryObservatio
 
     private sealed class Lease(
         ScriptedMovePort owner,
-        ScriptedMoveStep step) : IMoveOperationLease
+        ScriptedMoveStep step,
+        ExecutionManifestItem item) : IMoveOperationLease
     {
-        public EntryIdentity ExpectedSourceIdentity => step.Identity;
+        public PhysicalEntryIdentity SourcePhysicalIdentity => step.Identity;
+
+        public PhysicalEntryIdentity DestinationDirectoryPhysicalIdentity =>
+            step.DestinationDirectoryIdentityOverride
+            ?? item.DestinationDirectoryPhysicalIdentity;
 
         public ValueTask<MoveAttemptResult> CommitAsync()
         {
@@ -337,7 +344,7 @@ internal sealed class ScriptedMoveStep
     internal ScriptedMoveStep(int ordinal)
     {
         Ordinal = ordinal;
-        Identity = new EntryIdentity("test", "volume", $"entry-{ordinal}");
+        Identity = TestPhysicalIdentities.File($"entry-{ordinal}");
         CurrentObservation = SourceOnly(Identity);
         PostCommitObservation = TargetOnly(Identity);
         AttemptResult = MoveAttemptResult.Success();
@@ -345,7 +352,9 @@ internal sealed class ScriptedMoveStep
 
     internal int Ordinal { get; }
 
-    internal EntryIdentity Identity { get; }
+    internal PhysicalEntryIdentity Identity { get; set; }
+
+    internal PhysicalEntryIdentity? DestinationDirectoryIdentityOverride { get; set; }
 
     internal ExecutionReadiness AcquisitionReadiness { get; set; } =
         ExecutionReadiness.Ready;
@@ -366,11 +375,11 @@ internal sealed class ScriptedMoveStep
 
     internal Action? OnRecoveryObserved { get; set; }
 
-    internal static MoveObservation SourceOnly(EntryIdentity identity) => new(
+    internal static MoveObservation SourceOnly(PhysicalEntryIdentity identity) => new(
         RecoveryEntryObservation.Present(identity),
         RecoveryEntryObservation.Missing());
 
-    internal static MoveObservation TargetOnly(EntryIdentity identity) => new(
+    internal static MoveObservation TargetOnly(PhysicalEntryIdentity identity) => new(
         RecoveryEntryObservation.Missing(),
         RecoveryEntryObservation.Present(identity));
 }

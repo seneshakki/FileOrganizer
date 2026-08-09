@@ -1,5 +1,6 @@
 using FileOrganizer.Core.Files;
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
 using FileOrganizer.Core.Scanning;
 
 namespace FileOrganizer.Core.Tests.Scanning;
@@ -75,6 +76,23 @@ public sealed class FileScanResultTests
     }
 
     [Fact]
+    public void PhysicalIdentityBreaksOtherwiseEqualSourceOrderingDeterministically()
+    {
+        CanonicalPath path = Path(@"C:\Inbox\report.pdf");
+        PhysicalEntryIdentity firstIdentity = TestFiles.FileIdentity("entry-2", "volume-1");
+        PhysicalEntryIdentity secondIdentity = TestFiles.FileIdentity("entry-1", "volume-2");
+        FileEntry first = new(path, 1, null, Modified, firstIdentity);
+        FileEntry second = new(path, 1, null, Modified, secondIdentity);
+
+        FileScanResult forward = new(Path(@"C:\Inbox"), [first, second], []);
+        FileScanResult reversed = new(Path(@"C:\Inbox"), [second, first], []);
+
+        string[] expected = ["volume-1/entry-2", "volume-2/entry-1"];
+        Assert.Equal(expected, forward.Files.Select(IdentityKey));
+        Assert.Equal(expected, reversed.Files.Select(IdentityKey));
+    }
+
+    [Fact]
     public void PropagatesCancellationDuringImmutableMaterialization()
     {
         using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
@@ -90,7 +108,26 @@ public sealed class FileScanResultTests
         Assert.Equal(cancellation.Token, exception.CancellationToken);
     }
 
+    [Fact]
+    public void RetainsOnlyADirectoryIdentityForTheScanRoot()
+    {
+        PhysicalEntryIdentity rootIdentity = TestFiles.DirectoryIdentity("root-1");
+
+        FileScanResult result = new(Path(@"C:\Inbox"), [], [], rootIdentity);
+
+        Assert.Same(rootIdentity, result.RootPhysicalIdentity);
+        Assert.Throws<ArgumentException>(
+            () => new FileScanResult(
+                Path(@"C:\Inbox"),
+                [],
+                [],
+                TestFiles.FileIdentity("file-1")));
+    }
+
     private FileEntry Entry(string path) => new(Path(path), 1, null, Modified);
+
+    private static string IdentityKey(FileEntry entry) =>
+        $"{entry.PhysicalIdentity!.VolumeIdentity}/{entry.PhysicalIdentity.EntryIdentifier}";
 
     private IEnumerable<FileEntry> CancelBeforeSecondFile(
         CancellationTokenSource cancellation)

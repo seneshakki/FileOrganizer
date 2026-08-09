@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using FileOrganizer.Core.Actions;
 using FileOrganizer.Core.Files;
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
 using FileOrganizer.Core.Rules;
 
 namespace FileOrganizer.Core.Planning;
@@ -19,6 +20,7 @@ public sealed class OrganizationPlanItem
         OrganizationAction? proposedAction,
         CanonicalPath? proposedTargetPath,
         CanonicalPath? destinationDirectory,
+        PhysicalEntryIdentity? destinationDirectoryPhysicalIdentity,
         PlanItemOutcome outcome,
         IEnumerable<PlanReason> reasons)
     {
@@ -48,6 +50,22 @@ public sealed class OrganizationPlanItem
                 nameof(outcome));
         }
 
+        if (destinationDirectoryPhysicalIdentity?.EntryKind
+            is not (null or PhysicalEntryKind.Directory))
+        {
+            throw new ArgumentException(
+                "A destination directory can retain only a directory physical identity.",
+                nameof(destinationDirectoryPhysicalIdentity));
+        }
+
+        if (destinationDirectoryPhysicalIdentity is not null
+            && destinationDirectory is null)
+        {
+            throw new ArgumentException(
+                "Destination identity requires a destination directory path.",
+                nameof(destinationDirectoryPhysicalIdentity));
+        }
+
         Source = source;
         SourcePrecondition = sourcePrecondition;
         RuleEvaluation = ruleEvaluation;
@@ -55,6 +73,7 @@ public sealed class OrganizationPlanItem
         ProposedAction = proposedAction;
         ProposedTargetPath = proposedTargetPath;
         DestinationDirectory = destinationDirectory;
+        DestinationDirectoryPhysicalIdentity = destinationDirectoryPhysicalIdentity;
         Outcome = outcome;
         _reasons = Array.AsReadOnly(reasonSnapshot);
     }
@@ -82,6 +101,12 @@ public sealed class OrganizationPlanItem
 
     /// <summary>Gets the directory that must contain the proposed target.</summary>
     public CanonicalPath? DestinationDirectory { get; }
+
+    /// <summary>
+    /// Gets the strong identity captured for the required destination directory,
+    /// or <see langword="null"/> for a preview-only proposal.
+    /// </summary>
+    public PhysicalEntryIdentity? DestinationDirectoryPhysicalIdentity { get; }
 
     /// <summary>Gets the exact item-level outcome.</summary>
     public PlanItemOutcome Outcome { get; }

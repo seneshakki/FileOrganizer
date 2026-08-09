@@ -2,6 +2,8 @@ using System.Globalization;
 using FileOrganizer.Application.Execution;
 using FileOrganizer.Core.Actions;
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
+using FileOrganizer.Core.Planning;
 using FileOrganizer.Core.Scanning;
 
 namespace FileOrganizer.Application.Tests.Execution;
@@ -145,6 +147,99 @@ public sealed class ExecutionManifestCompilerTests
                 [Move(@"C:\Inbox\a.txt", @"C:\Sorted", "move", length: 11)]));
 
         Assert.NotEqual(first.Fingerprint, second.Fingerprint);
+    }
+
+    [Fact]
+    public void RetainsEveryRequiredPhysicalIdentityInTheManifest()
+    {
+        OrganizationPlan plan = ManifestTestPlan.Create(
+            [Move(@"C:\Inbox\a.txt", @"C:\Sorted", "move")]);
+
+        ExecutionManifest manifest = Compile(plan);
+        OrganizationPlanItem planItem = Assert.Single(plan.Items);
+        ExecutionManifestItem manifestItem = Assert.Single(manifest.Items);
+
+        Assert.Equal(2, ExecutionManifest.FingerprintFormatVersion);
+        Assert.Same(plan.SourceRootPhysicalIdentity, manifest.SourceRootPhysicalIdentity);
+        Assert.Same(
+            planItem.SourcePrecondition.PhysicalIdentity,
+            manifestItem.SourcePrecondition.PhysicalIdentity);
+        Assert.Same(
+            planItem.DestinationDirectoryPhysicalIdentity,
+            manifestItem.DestinationDirectoryPhysicalIdentity);
+    }
+
+    [Theory]
+    [InlineData(false, true, true, ExecutionManifestProblemKind.SourceRootPhysicalIdentityMissing)]
+    [InlineData(true, false, true, ExecutionManifestProblemKind.SourcePhysicalIdentityMissing)]
+    [InlineData(true, true, false, ExecutionManifestProblemKind.DestinationDirectoryPhysicalIdentityMissing)]
+    public void RejectsIdentityDeficientPreviewsWithAnExactStructuredProblem(
+        bool includeRootIdentity,
+        bool includeSourceIdentity,
+        bool includeDestinationIdentity,
+        ExecutionManifestProblemKind expectedKind)
+    {
+        OrganizationPlan plan = ManifestTestPlan.Create(
+            [Move(@"C:\Inbox\a.txt", @"C:\Sorted", "move")],
+            includeSourceRootPhysicalIdentity: includeRootIdentity,
+            includeSourcePhysicalIdentities: includeSourceIdentity,
+            includeDestinationDirectoryPhysicalIdentities: includeDestinationIdentity);
+
+        ExecutionManifestCompilation compilation = ExecutionManifestCompiler.Compile(plan);
+
+        Assert.False(plan.IsEligibleForExecution);
+        Assert.Equal(PlanItemOutcome.Ready, Assert.Single(plan.Items).Outcome);
+        Assert.False(compilation.Succeeded);
+        Assert.Null(compilation.Manifest);
+        Assert.Equal(expectedKind, Assert.Single(compilation.Problems).Kind);
+    }
+
+    public static TheoryData<PhysicalEntryIdentity> DifferentRootIdentities => new()
+    {
+        TestPhysicalIdentities.Directory("root", scheme: "other-scheme"),
+        TestPhysicalIdentities.Directory("root", schemeVersion: 2),
+        TestPhysicalIdentities.Directory("root", volumeIdentity: "other-volume"),
+        TestPhysicalIdentities.Directory("other-root"),
+    };
+
+    [Theory]
+    [MemberData(nameof(DifferentRootIdentities))]
+    public void FingerprintHashesEveryRootIdentityComponent(
+        PhysicalEntryIdentity differentIdentity)
+    {
+        PhysicalEntryIdentity baselineIdentity = TestPhysicalIdentities.Directory("root");
+        ExecutionManifest baseline = Compile(
+            ManifestTestPlan.Create(
+                [Move(@"C:\Inbox\a.txt", @"C:\Sorted", "move")],
+                sourceRootPhysicalIdentity: baselineIdentity));
+        ExecutionManifest changed = Compile(
+            ManifestTestPlan.Create(
+                [Move(@"C:\Inbox\a.txt", @"C:\Sorted", "move")],
+                sourceRootPhysicalIdentity: differentIdentity));
+
+        Assert.NotEqual(baseline.Fingerprint, changed.Fingerprint);
+    }
+
+    [Fact]
+    public void FingerprintHashesSourceAndDestinationDirectoryIdentity()
+    {
+        ManifestTestPlan.TestOperation operation =
+            Move(@"C:\Inbox\a.txt", @"C:\Sorted", "move");
+        ExecutionManifest baseline = Compile(ManifestTestPlan.Create([operation]));
+        ExecutionManifest changedSource = Compile(
+            ManifestTestPlan.Create(
+                [operation],
+                sourcePhysicalIdentityFactory: _ =>
+                    TestPhysicalIdentities.File("different-source")));
+        ExecutionManifest changedDestination = Compile(
+            ManifestTestPlan.Create(
+                [operation],
+                destinationPhysicalIdentityFactory: _ =>
+                    TestPhysicalIdentities.Directory("different-destination")));
+
+        Assert.NotEqual(baseline.Fingerprint, changedSource.Fingerprint);
+        Assert.NotEqual(baseline.Fingerprint, changedDestination.Fingerprint);
+        Assert.NotEqual(changedSource.Fingerprint, changedDestination.Fingerprint);
     }
 
     [Fact]

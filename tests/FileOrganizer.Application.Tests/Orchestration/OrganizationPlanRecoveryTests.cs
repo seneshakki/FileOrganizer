@@ -111,7 +111,10 @@ public sealed class OrganizationPlanRecoveryTests
         context.Moves[0].CurrentObservation = new MoveObservation(
             RecoveryEntryObservation.Present(context.Moves[0].Identity),
             RecoveryEntryObservation.Present(
-                new EntryIdentity("test", "volume", "different")));
+                TestPhysicalIdentities.File(
+                    "different",
+                    volumeIdentity: "volume",
+                    scheme: "test")));
 
         ExecutionRecoveryResult result = await context.RecoverAsync(fingerprint);
 
@@ -324,9 +327,9 @@ public sealed class OrganizationPlanRecoveryTests
         ExecutionManifest manifest = Compile(Plan());
         ExecutionManifest other = Compile(Plan("other-shape"));
         RecoveryResolution conflict = MoveRecoveryStateMachine.Classify(
-            new EntryIdentity("test", "volume", "expected"),
+            TestPhysicalIdentities.File("expected", "volume", "test"),
             RecoveryEntryObservation.Present(
-                new EntryIdentity("test", "volume", "changed")),
+                TestPhysicalIdentities.File("changed", "volume", "test")),
             RecoveryEntryObservation.Missing());
 
         Assert.Throws<ArgumentException>(

@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
 
 namespace FileOrganizer.Application.Execution;
 
@@ -13,7 +14,7 @@ namespace FileOrganizer.Application.Execution;
 public sealed class ExecutionManifest
 {
     /// <summary>The canonical binary fingerprint format emitted by this version.</summary>
-    public const int FingerprintFormatVersion = 1;
+    public const int FingerprintFormatVersion = 2;
 
     private readonly ReadOnlyCollection<ExecutionManifestItem> _items;
 
@@ -21,11 +22,20 @@ public sealed class ExecutionManifest
         PlanFingerprint fingerprint,
         DateTimeOffset generatedAtUtc,
         CanonicalPath sourceRoot,
+        PhysicalEntryIdentity sourceRootPhysicalIdentity,
         IEnumerable<ExecutionManifestItem> items)
     {
         ArgumentNullException.ThrowIfNull(fingerprint);
         ArgumentNullException.ThrowIfNull(sourceRoot);
+        ArgumentNullException.ThrowIfNull(sourceRootPhysicalIdentity);
         ArgumentNullException.ThrowIfNull(items);
+
+        if (sourceRootPhysicalIdentity.EntryKind != PhysicalEntryKind.Directory)
+        {
+            throw new ArgumentException(
+                "The manifest source root identity must identify a directory.",
+                nameof(sourceRootPhysicalIdentity));
+        }
 
         ExecutionManifestItem[] snapshot = [.. items];
         for (int index = 0; index < snapshot.Length; index++)
@@ -51,6 +61,7 @@ public sealed class ExecutionManifest
         Fingerprint = fingerprint;
         GeneratedAtUtc = generatedAtUtc.ToUniversalTime();
         SourceRoot = sourceRoot;
+        SourceRootPhysicalIdentity = sourceRootPhysicalIdentity;
         _items = Array.AsReadOnly(snapshot);
     }
 
@@ -62,6 +73,9 @@ public sealed class ExecutionManifest
 
     /// <summary>Gets the canonical source root inherited from the dry-run plan.</summary>
     public CanonicalPath SourceRoot { get; }
+
+    /// <summary>Gets the strong physical identity of the scanned source root.</summary>
+    public PhysicalEntryIdentity SourceRootPhysicalIdentity { get; }
 
     /// <summary>Gets the explicit lexical semantics shared by all manifest paths.</summary>
     public PathSemantics PathSemantics => SourceRoot.Semantics;

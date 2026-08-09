@@ -2,6 +2,7 @@ using FileOrganizer.Core.Actions;
 using FileOrganizer.Core.Files;
 using FileOrganizer.Core.Matching;
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
 using FileOrganizer.Core.Rules;
 using FileOrganizer.Core.Scanning;
 
@@ -71,6 +72,7 @@ public sealed class OrganizationPlanner
         return new OrganizationPlanPreparation(
             context.UtcNow,
             scan.CanonicalRoot,
+            scan.RootPhysicalIdentity,
             scan.IsComplete,
             scan.Diagnostics,
             pathPolicy,
@@ -136,9 +138,25 @@ public sealed class OrganizationPlanner
                     policyMismatch))
             .ToArray();
 
+        bool lacksRequiredPhysicalIdentity =
+            preparation.SourceRootPhysicalIdentity is null
+            || finalItems.Any(
+                item => item.Outcome == PlanItemOutcome.Ready
+                    && (item.SourcePrecondition.PhysicalIdentity is null
+                        || item.DestinationDirectoryPhysicalIdentity is null));
+        if (lacksRequiredPhysicalIdentity)
+        {
+            diagnostics.Add(
+                new OrganizationPlanDiagnostic(
+                    OrganizationPlanDiagnosticKind.StrongPhysicalIdentityUnavailable,
+                    "The source root or a ready operation lacks strong physical identity, "
+                    + "so this preview is not eligible for execution."));
+        }
+
         return new OrganizationPlan(
             preparation.GeneratedAtUtc,
             preparation.SourceRoot,
+            preparation.SourceRootPhysicalIdentity,
             preparation.IsScanComplete,
             preparation.ScanDiagnostics,
             diagnostics,
@@ -368,6 +386,7 @@ public sealed class OrganizationPlanner
         List<PlanReason> reasons = [.. prepared.Reasons];
         bool blocked = false;
         bool conflict = false;
+        PhysicalEntryIdentity? destinationDirectoryPhysicalIdentity = null;
 
         if (targetGroups[target].Count > 1)
         {
@@ -394,7 +413,8 @@ public sealed class OrganizationPlanner
                 prepared.DestinationDirectory!,
                 factGroups,
                 reasons,
-                ref blocked);
+                ref blocked,
+                out destinationDirectoryPhysicalIdentity);
             EvaluateTarget(
                 target,
                 factGroups,
@@ -415,15 +435,21 @@ public sealed class OrganizationPlanner
             .ThenBy(reason => reason.AffectedPath?.Value, StringComparer.Ordinal)
             .ToArray();
 
-        return Final(prepared, outcome, orderedReasons);
+        return Final(
+            prepared,
+            outcome,
+            orderedReasons,
+            destinationDirectoryPhysicalIdentity);
     }
 
     private static void EvaluateDestinationDirectory(
         CanonicalPath directory,
         Dictionary<CanonicalPath, List<DestinationPathFact>> factGroups,
         List<PlanReason> reasons,
-        ref bool blocked)
+        ref bool blocked,
+        out PhysicalEntryIdentity? physicalIdentity)
     {
+        physicalIdentity = null;
         DestinationPathFact? fact = FindUnambiguousFact(
             directory,
             factGroups,
@@ -437,6 +463,7 @@ public sealed class OrganizationPlanner
         switch (fact.EntryKind)
         {
             case DestinationEntryKind.Directory:
+                physicalIdentity = fact.PhysicalIdentity;
                 return;
 
             case DestinationEntryKind.Missing:
@@ -557,7 +584,8 @@ public sealed class OrganizationPlanner
         DestinationPathFact first = facts[0];
         return facts.All(
             fact => fact.EntryKind == first.EntryKind
-                && fact.Failure == first.Failure);
+                && fact.Failure == first.Failure
+                && fact.PhysicalIdentity == first.PhysicalIdentity);
     }
 
     private static Dictionary<CanonicalPath, List<PreparedPlanItem>> BuildTargetGroups(
@@ -659,7 +687,8 @@ public sealed class OrganizationPlanner
     private static OrganizationPlanItem Final(
         PreparedPlanItem prepared,
         PlanItemOutcome outcome,
-        IEnumerable<PlanReason> reasons) =>
+        IEnumerable<PlanReason> reasons,
+        PhysicalEntryIdentity? destinationDirectoryPhysicalIdentity = null) =>
         new(
             prepared.Source,
             prepared.SourcePrecondition,
@@ -668,6 +697,7 @@ public sealed class OrganizationPlanner
             prepared.ProposedAction,
             prepared.ProposedTargetPath,
             prepared.DestinationDirectory,
+            destinationDirectoryPhysicalIdentity,
             outcome,
             reasons);
 
@@ -718,9 +748,17 @@ public sealed class OrganizationPlanner
             }
 
             int created = Nullable.Compare(left.CreatedUtc, right.CreatedUtc);
-            return created != 0
-                ? created
-                : left.ModifiedUtc.CompareTo(right.ModifiedUtc);
+            if (created != 0)
+            {
+                return created;
+            }
+
+            int modified = left.ModifiedUtc.CompareTo(right.ModifiedUtc);
+            return modified != 0
+                ? modified
+                : PhysicalEntryIdentityOrdering.Compare(
+                    left.PhysicalIdentity,
+                    right.PhysicalIdentity);
         }
     }
 

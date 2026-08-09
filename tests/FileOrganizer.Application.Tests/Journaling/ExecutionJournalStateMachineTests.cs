@@ -1,4 +1,6 @@
 using FileOrganizer.Application.Execution;
+using FileOrganizer.Application.Tests.Execution;
+using FileOrganizer.Core.Physical;
 using FileOrganizer.Application.Journaling;
 
 namespace FileOrganizer.Application.Tests.Journaling;
@@ -8,8 +10,8 @@ public sealed class ExecutionJournalStateMachineTests
     private static readonly DateTimeOffset StartedAt =
         new(2026, 8, 9, 9, 0, 0, TimeSpan.Zero);
 
-    private static readonly EntryIdentity ExpectedIdentity =
-        new("test-id-v1", "volume", "entry");
+    private static readonly PhysicalEntryIdentity ExpectedIdentity =
+        TestPhysicalIdentities.File("entry", "volume", "test-id-v1");
 
     [Fact]
     public void ReplaysACompleteExecutionInManifestOrder()

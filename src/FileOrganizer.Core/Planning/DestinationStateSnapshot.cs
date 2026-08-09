@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using FileOrganizer.Core.Collections;
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
 
 namespace FileOrganizer.Core.Planning;
 
@@ -97,11 +98,19 @@ public sealed class DestinationStateSnapshot
             }
 
             int failureKind = Nullable.Compare(left.Failure?.Kind, right.Failure?.Kind);
-            return failureKind != 0
-                ? failureKind
-                : StringComparer.Ordinal.Compare(
-                    left.Failure?.Description,
-                    right.Failure?.Description);
+            if (failureKind != 0)
+            {
+                return failureKind;
+            }
+
+            int failureDescription = StringComparer.Ordinal.Compare(
+                left.Failure?.Description,
+                right.Failure?.Description);
+            return failureDescription != 0
+                ? failureDescription
+                : PhysicalEntryIdentityOrdering.Compare(
+                    left.PhysicalIdentity,
+                    right.PhysicalIdentity);
         }
     }
 }

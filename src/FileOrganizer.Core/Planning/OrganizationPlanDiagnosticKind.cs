@@ -11,4 +11,10 @@ public enum OrganizationPlanDiagnosticKind
 
     /// <summary>Destination facts use path semantics different from the preparation.</summary>
     DestinationSnapshotPolicyMismatch,
+
+    /// <summary>
+    /// A source root, ready source, or required destination directory lacks
+    /// path-independent physical identity, so the plan remains preview-only.
+    /// </summary>
+    StrongPhysicalIdentityUnavailable,
 }

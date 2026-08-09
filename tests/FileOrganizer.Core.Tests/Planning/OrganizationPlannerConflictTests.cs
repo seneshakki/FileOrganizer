@@ -317,6 +317,47 @@ public sealed class OrganizationPlannerConflictTests
             forward.Items.Select(item => item.Source.FullPath));
     }
 
+    [Fact]
+    public void DestinationFactsRejectIdentityThatContradictsObservedState()
+    {
+        PathPolicy policy = Policy(caseSensitive: false, normalizeUnicode: true);
+        CanonicalPath path = Path(policy, @"C:\Archive");
+
+        Assert.Throws<ArgumentException>(
+            () => new DestinationPathFact(
+                path,
+                DestinationEntryKind.Missing,
+                physicalIdentity: TestFiles.DirectoryIdentity("missing")));
+        Assert.Throws<ArgumentException>(
+            () => new DestinationPathFact(
+                path,
+                DestinationEntryKind.Directory,
+                physicalIdentity: TestFiles.FileIdentity("file")));
+    }
+
+    [Fact]
+    public void DestinationSnapshotOrdersConflictingIdentitiesDeterministically()
+    {
+        PathPolicy policy = Policy(caseSensitive: false, normalizeUnicode: true);
+        CanonicalPath path = Path(policy, @"C:\Archive");
+        DestinationPathFact later = new(
+            path,
+            DestinationEntryKind.Directory,
+            physicalIdentity: TestFiles.DirectoryIdentity("z-entry"));
+        DestinationPathFact earlier = new(
+            path,
+            DestinationEntryKind.Directory,
+            physicalIdentity: TestFiles.DirectoryIdentity("a-entry"));
+
+        DestinationStateSnapshot forward = Snapshot(policy, [later, earlier]);
+        DestinationStateSnapshot reversed = Snapshot(policy, [earlier, later]);
+
+        Assert.Equal(
+            ["a-entry", "z-entry"],
+            forward.Facts.Select(fact => fact.PhysicalIdentity!.EntryIdentifier));
+        Assert.Equal(forward.Facts, reversed.Facts);
+    }
+
     private static OrganizationPlanPreparation SinglePreparation(PathPolicy policy) =>
         Prepare(policy, [Entry(policy, @"C:\Inbox\a.txt")], @"C:\Archive");
 
@@ -325,7 +366,12 @@ public sealed class OrganizationPlannerConflictTests
         IEnumerable<FileEntry> files,
         string destination)
     {
-        FileScanResult scan = new(Path(policy, @"C:\Inbox"), files, []);
+        CanonicalPath root = Path(policy, @"C:\Inbox");
+        FileScanResult scan = new(
+            root,
+            files,
+            [],
+            rootPhysicalIdentity: TestFiles.DirectoryIdentity(root.Value));
         OrganizationRuleSet rules = new(
         [
             new OrganizationRule(
@@ -360,13 +406,19 @@ public sealed class OrganizationPlannerConflictTests
                 path,
                 directories.Contains(path)
                     ? DestinationEntryKind.Directory
-                    : DestinationEntryKind.Missing));
+                    : DestinationEntryKind.Missing,
+                physicalIdentity: directories.Contains(path)
+                    ? TestFiles.DirectoryIdentity(path.Value)
+                    : null));
     }
 
     private static IEnumerable<DestinationPathFact> DirectoryFacts(
         OrganizationPlanPreparation preparation) =>
         preparation.DestinationDirectories.Select(
-            path => new DestinationPathFact(path, DestinationEntryKind.Directory));
+            path => new DestinationPathFact(
+                path,
+                DestinationEntryKind.Directory,
+                physicalIdentity: TestFiles.DirectoryIdentity(path.Value)));
 
     private static DestinationStateSnapshot Snapshot(
         PathPolicy policy,
@@ -374,7 +426,12 @@ public sealed class OrganizationPlannerConflictTests
         new(policy.Semantics, facts);
 
     private static FileEntry Entry(PathPolicy policy, string path) =>
-        new(Path(policy, path), 1, null, Now.AddDays(-1));
+        new(
+            Path(policy, path),
+            1,
+            null,
+            Now.AddDays(-1),
+            TestFiles.FileIdentity(path));
 
     private static CanonicalPath Path(PathPolicy policy, string value) =>
         policy.CanonicalizeAbsolute(value).Path

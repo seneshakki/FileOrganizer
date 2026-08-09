@@ -1,4 +1,5 @@
 using FileOrganizer.Application.Execution;
+using FileOrganizer.Application.Tests.Execution;
 using FileOrganizer.Application.Journaling;
 
 namespace FileOrganizer.Application.Tests.Journaling;
@@ -45,7 +46,7 @@ public sealed class FakeJournalBoundaryTests
             1,
             StartedAt.AddSeconds(1),
             0,
-            new EntryIdentity("test-id-v1", "volume", "entry"));
+            TestPhysicalIdentities.File("entry", "volume", "test-id-v1"));
 
         JournalPublishResult published = await store.PublishAsync(intent, cancellationToken);
         JournalPublishResult repeated = await store.PublishAsync(intent, cancellationToken);
@@ -160,10 +161,10 @@ public sealed class FakeJournalBoundaryTests
                     sequence,
                     StartedAt.AddSeconds(sequence),
                     item.Ordinal,
-                    new EntryIdentity(
-                        "test-id-v1",
+                    TestPhysicalIdentities.File(
+                        $"entry-{item.Ordinal}",
                         "volume",
-                        $"entry-{item.Ordinal}")),
+                        "test-id-v1")),
                 cancellationToken);
             Assert.Equal(JournalPublishStatus.Published, intent.Status);
             sequence++;

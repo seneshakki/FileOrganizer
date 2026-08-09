@@ -1,4 +1,4 @@
-using FileOrganizer.Application.Execution;
+using FileOrganizer.Core.Physical;
 
 namespace FileOrganizer.Application.Orchestration;
 
@@ -14,8 +14,13 @@ namespace FileOrganizer.Application.Orchestration;
 /// </remarks>
 public interface IMoveOperationLease : IAsyncDisposable
 {
-    /// <summary>The identity that must be durably published with MoveIntent.</summary>
-    EntryIdentity ExpectedSourceIdentity { get; }
+    /// <summary>The source identity bound by immediate revalidation.</summary>
+    /// <remarks>It must equal the manifest identity before a move intent is published.</remarks>
+    PhysicalEntryIdentity SourcePhysicalIdentity { get; }
+
+    /// <summary>The destination directory identity bound by immediate revalidation.</summary>
+    /// <remarks>It must equal the manifest identity before a move intent is published.</remarks>
+    PhysicalEntryIdentity DestinationDirectoryPhysicalIdentity { get; }
 
     /// <summary>
     /// Invokes the abstract no-overwrite move primitive. User cancellation is

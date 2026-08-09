@@ -2,6 +2,7 @@ using System.Diagnostics;
 using FileOrganizer.Application.Execution;
 using FileOrganizer.Application.Journaling;
 using FileOrganizer.Application.Recovery;
+using FileOrganizer.Core.Physical;
 using FileOrganizer.Core.Planning;
 
 namespace FileOrganizer.Application.Orchestration;
@@ -251,12 +252,42 @@ public sealed class OrganizationPlanExecutor
                 IMoveOperationLease moveLease = acquisition.Lease!;
                 await using (moveLease.ConfigureAwait(false))
                 {
+                    ExecutionProblem? identityProblem = ValidateLeasePhysicalIdentities(
+                        item,
+                        moveLease);
+                    if (identityProblem is not null)
+                    {
+                        JournalRecordReasonKind stopReason = identityProblem.Kind
+                            == ExecutionProblemKind.SourceRevalidationFailed
+                                ? JournalRecordReasonKind.SourceRevalidationFailed
+                                : JournalRecordReasonKind.DestinationRevalidationFailed;
+                        ExecutionJournalRecord stop = ExecutionJournalRecord.ExecutionStopped(
+                            manifest.Fingerprint,
+                            nextSequence,
+                            NextJournalTime(ref lastJournalTime),
+                            ordinal,
+                            stopReason);
+                        await PublishRequiredAsync(stop).ConfigureAwait(false);
+
+                        results[ordinal] = new ExecutionItemResult(
+                            ordinal,
+                            ExecutionItemOutcome.Blocked,
+                            [identityProblem]);
+                        return CreateDefiniteStopResult(
+                            manifest,
+                            attemptStartedAt,
+                            results,
+                            identityProblem);
+                    }
+
+                    PhysicalEntryIdentity expectedSourceIdentity =
+                        item.SourcePrecondition.PhysicalIdentity!;
                     ExecutionJournalRecord intent = ExecutionJournalRecord.MoveIntent(
                         manifest.Fingerprint,
                         nextSequence++,
                         NextJournalTime(ref lastJournalTime),
                         ordinal,
-                        moveLease.ExpectedSourceIdentity);
+                        expectedSourceIdentity);
                     await PublishRequiredAsync(intent).ConfigureAwait(false);
 
                     // This is the critical boundary: unexpected failures intentionally
@@ -268,7 +299,7 @@ public sealed class OrganizationPlanExecutor
                         .ConfigureAwait(false);
 
                     RecoveryResolution resolution = MoveRecoveryStateMachine.Classify(
-                        moveLease.ExpectedSourceIdentity,
+                        expectedSourceIdentity,
                         observation.Source,
                         observation.Target);
                     ExecutionJournalRecord outcomeRecord = CreateMoveOutcomeRecord(
@@ -1111,6 +1142,30 @@ public sealed class OrganizationPlanExecutor
         {
             ValidateOperationProblem(item, attempt.Problem);
         }
+    }
+
+    private static ExecutionProblem? ValidateLeasePhysicalIdentities(
+        ExecutionManifestItem item,
+        IMoveOperationLease lease)
+    {
+        if (!item.SourcePrecondition.PhysicalIdentity!.Equals(lease.SourcePhysicalIdentity))
+        {
+            return new ExecutionProblem(
+                ExecutionProblemKind.SourceRevalidationFailed,
+                "The move lease is bound to a different physical source entry.",
+                item.Ordinal);
+        }
+
+        if (!item.DestinationDirectoryPhysicalIdentity.Equals(
+                lease.DestinationDirectoryPhysicalIdentity))
+        {
+            return new ExecutionProblem(
+                ExecutionProblemKind.DestinationRevalidationFailed,
+                "The move lease is bound to a different physical destination directory.",
+                item.Ordinal);
+        }
+
+        return null;
     }
 
     private static void ValidateBegunSnapshot(

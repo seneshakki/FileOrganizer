@@ -1,7 +1,9 @@
 using FileOrganizer.Application.Execution;
 using FileOrganizer.Application.Journaling;
 using FileOrganizer.Application.Recovery;
+using FileOrganizer.Application.Tests.Execution;
 using FileOrganizer.Application.Tests.Journaling;
+using FileOrganizer.Core.Physical;
 
 namespace FileOrganizer.Application.Tests.Recovery;
 
@@ -10,11 +12,11 @@ public sealed class MoveRecoveryStateMachineTests
     private static readonly DateTimeOffset StartedAt =
         new(2026, 8, 9, 10, 0, 0, TimeSpan.Zero);
 
-    private static readonly EntryIdentity Expected =
-        new("windows-file-id-v1", "volume-a", "entry-42");
+    private static readonly PhysicalEntryIdentity Expected =
+        TestPhysicalIdentities.File("entry-42", "volume-a", "windows-file-id-v1");
 
-    private static readonly EntryIdentity Different =
-        new("windows-file-id-v1", "volume-a", "entry-99");
+    private static readonly PhysicalEntryIdentity Different =
+        TestPhysicalIdentities.File("entry-99", "volume-a", "windows-file-id-v1");
 
     public static TheoryData<
         RecoveryEntryObservation,
@@ -186,9 +188,18 @@ public sealed class MoveRecoveryStateMachineTests
     [Fact]
     public void IdentityComparisonIsOpaqueAndOrdinal()
     {
-        EntryIdentity first = new("Scheme", "Volume", "Entry");
-        EntryIdentity same = new("Scheme", "Volume", "Entry");
-        EntryIdentity differentCase = new("scheme", "Volume", "Entry");
+        PhysicalEntryIdentity first = TestPhysicalIdentities.File(
+            "Entry",
+            "Volume",
+            "Scheme");
+        PhysicalEntryIdentity same = TestPhysicalIdentities.File(
+            "Entry",
+            "Volume",
+            "Scheme");
+        PhysicalEntryIdentity differentCase = TestPhysicalIdentities.File(
+            "Entry",
+            "Volume",
+            "scheme");
 
         Assert.Equal(first, same);
         Assert.NotEqual(first, differentCase);

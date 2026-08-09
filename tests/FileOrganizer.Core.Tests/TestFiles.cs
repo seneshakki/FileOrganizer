@@ -1,5 +1,6 @@
 using FileOrganizer.Core.Files;
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
 
 namespace FileOrganizer.Core.Tests;
 
@@ -40,10 +41,24 @@ internal static class TestFiles
         long sizeInBytes = 1024,
         DateTimeOffset? created = null,
         DateTimeOffset? modified = null,
-        CanonicalPath? path = null) =>
-        new(
-            path ?? CanonicalPathFor(name),
+        CanonicalPath? path = null)
+    {
+        CanonicalPath selectedPath = path ?? CanonicalPathFor(name);
+        return new(
+            selectedPath,
             sizeInBytes,
             created,
-            modified ?? DefaultModified);
+            modified ?? DefaultModified,
+            FileIdentity(selectedPath.Value));
+    }
+
+    public static PhysicalEntryIdentity FileIdentity(
+        string identifier,
+        string volumeIdentity = "test-volume") =>
+        new("test-physical-id", 1, volumeIdentity, identifier, PhysicalEntryKind.RegularFile);
+
+    public static PhysicalEntryIdentity DirectoryIdentity(
+        string identifier,
+        string volumeIdentity = "test-volume") =>
+        new("test-physical-id", 1, volumeIdentity, identifier, PhysicalEntryKind.Directory);
 }
