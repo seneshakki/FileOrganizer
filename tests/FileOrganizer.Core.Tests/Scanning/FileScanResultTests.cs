@@ -74,7 +74,31 @@ public sealed class FileScanResultTests
             result.Diagnostics.Select(diagnostic => diagnostic.AffectedPath));
     }
 
+    [Fact]
+    public void PropagatesCancellationDuringImmutableMaterialization()
+    {
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+
+        OperationCanceledException exception = Assert.Throws<OperationCanceledException>(
+            () => new FileScanResult(
+                Path(@"C:\Inbox"),
+                CancelBeforeSecondFile(cancellation),
+                [],
+                cancellation.Token));
+
+        Assert.Equal(cancellation.Token, exception.CancellationToken);
+    }
+
     private FileEntry Entry(string path) => new(Path(path), 1, null, Modified);
+
+    private IEnumerable<FileEntry> CancelBeforeSecondFile(
+        CancellationTokenSource cancellation)
+    {
+        yield return Entry(@"C:\Inbox\first.txt");
+        cancellation.Cancel();
+        yield return Entry(@"C:\Inbox\second.txt");
+    }
 
     private CanonicalPath Path(string value)
     {

@@ -10,8 +10,16 @@ namespace FileOrganizer.Infrastructure.FileSystem;
 /// <remarks>
 /// Traversal is deliberately manual and non-recursive at the System.IO layer.
 /// That lets every inaccessible or disappearing directory become a diagnostic
-/// instead of being silently suppressed by recursive enumeration. Reparse
-/// points are reported and never followed.
+/// instead of being silently suppressed by recursive enumeration. Entries
+/// observed as reparse points are reported and not traversed. Attribute
+/// rechecks narrow replacement races, but only handle-based validation in M3B
+/// can close the remaining physical-link TOCTOU window.
+///
+/// The public physical adapter is deliberately Windows-only in M3A. Core path
+/// and planning semantics remain portable, but System.IO does not expose enough
+/// POSIX entry-type information to distinguish a regular file from a socket or
+/// FIFO safely without platform interop. A POSIX adapter is deferred rather
+/// than silently treating those unsupported entries as files.
 /// </remarks>
 public sealed class PhysicalFileScanner : IFileScanner
 {
@@ -22,7 +30,7 @@ public sealed class PhysicalFileScanner : IFileScanner
 
     /// <summary>Creates a physical scanner using explicit lexical path semantics.</summary>
     public PhysicalFileScanner(PathPolicy pathPolicy)
-        : this(pathPolicy, new SystemReadOnlyFileSystemProbe())
+        : this(RequireWindows(pathPolicy), new SystemReadOnlyFileSystemProbe())
     {
     }
 
@@ -78,52 +86,59 @@ public sealed class PhysicalFileScanner : IFileScanner
         {
             cancellationToken.ThrowIfCancellationRequested();
             diagnostics.Add(new ScanDiagnostic(ScanDiagnosticKind.RootNotFound, sourceRoot.Value));
-            return Build(sourceRoot, files, diagnostics);
+            return Build(sourceRoot, files, diagnostics, cancellationToken);
         }
         catch (DirectoryNotFoundException)
         {
             cancellationToken.ThrowIfCancellationRequested();
             diagnostics.Add(new ScanDiagnostic(ScanDiagnosticKind.RootNotFound, sourceRoot.Value));
-            return Build(sourceRoot, files, diagnostics);
+            return Build(sourceRoot, files, diagnostics, cancellationToken);
         }
         catch (UnauthorizedAccessException)
         {
             cancellationToken.ThrowIfCancellationRequested();
             diagnostics.Add(new ScanDiagnostic(ScanDiagnosticKind.AccessDenied, sourceRoot.Value));
-            return Build(sourceRoot, files, diagnostics);
+            return Build(sourceRoot, files, diagnostics, cancellationToken);
         }
         catch (SecurityException)
         {
             cancellationToken.ThrowIfCancellationRequested();
             diagnostics.Add(new ScanDiagnostic(ScanDiagnosticKind.AccessDenied, sourceRoot.Value));
-            return Build(sourceRoot, files, diagnostics);
+            return Build(sourceRoot, files, diagnostics, cancellationToken);
         }
         catch (IOException)
         {
             cancellationToken.ThrowIfCancellationRequested();
             diagnostics.Add(new ScanDiagnostic(ScanDiagnosticKind.MetadataReadFailed, sourceRoot.Value));
-            return Build(sourceRoot, files, diagnostics);
+            return Build(sourceRoot, files, diagnostics, cancellationToken);
         }
         catch (NotSupportedException)
         {
             cancellationToken.ThrowIfCancellationRequested();
             diagnostics.Add(
                 new ScanDiagnostic(ScanDiagnosticKind.UnsupportedEntrySkipped, sourceRoot.Value));
-            return Build(sourceRoot, files, diagnostics);
+            return Build(sourceRoot, files, diagnostics, cancellationToken);
         }
 
         if ((rootAttributes & FileAttributes.ReparsePoint) != 0)
         {
             diagnostics.Add(
                 new ScanDiagnostic(ScanDiagnosticKind.ReparsePointSkipped, sourceRoot.Value));
-            return Build(sourceRoot, files, diagnostics);
+            return Build(sourceRoot, files, diagnostics, cancellationToken);
+        }
+
+        if ((rootAttributes & UnsupportedAttributes) != 0)
+        {
+            diagnostics.Add(
+                new ScanDiagnostic(ScanDiagnosticKind.UnsupportedEntrySkipped, sourceRoot.Value));
+            return Build(sourceRoot, files, diagnostics, cancellationToken);
         }
 
         if ((rootAttributes & FileAttributes.Directory) == 0)
         {
             diagnostics.Add(
                 new ScanDiagnostic(ScanDiagnosticKind.RootIsNotDirectory, sourceRoot.Value));
-            return Build(sourceRoot, files, diagnostics);
+            return Build(sourceRoot, files, diagnostics, cancellationToken);
         }
 
         Stack<CanonicalPath> pendingDirectories = new();
@@ -134,6 +149,40 @@ public sealed class PhysicalFileScanner : IFileScanner
             cancellationToken.ThrowIfCancellationRequested();
 
             CanonicalPath directory = pendingDirectories.Pop();
+            if (!TryReadAttributes(
+                    directory,
+                    diagnostics,
+                    cancellationToken,
+                    out FileAttributes directoryAttributes))
+            {
+                continue;
+            }
+
+            if ((directoryAttributes & FileAttributes.ReparsePoint) != 0)
+            {
+                diagnostics.Add(
+                    new ScanDiagnostic(
+                        ScanDiagnosticKind.ReparsePointSkipped,
+                        directory.Value));
+                continue;
+            }
+
+            if ((directoryAttributes & UnsupportedAttributes) != 0)
+            {
+                diagnostics.Add(
+                    new ScanDiagnostic(
+                        ScanDiagnosticKind.UnsupportedEntrySkipped,
+                        directory.Value));
+                continue;
+            }
+
+            if ((directoryAttributes & FileAttributes.Directory) == 0)
+            {
+                diagnostics.Add(
+                    new ScanDiagnostic(ScanDiagnosticKind.EntryChanged, directory.Value));
+                continue;
+            }
+
             List<string> children = ReadDirectoryChildren(
                 directory,
                 diagnostics,
@@ -173,18 +222,18 @@ public sealed class PhysicalFileScanner : IFileScanner
                     continue;
                 }
 
-                if ((attributes & FileAttributes.Directory) != 0)
-                {
-                    subdirectories?.Add(child);
-                    continue;
-                }
-
                 if ((attributes & UnsupportedAttributes) != 0)
                 {
                     diagnostics.Add(
                         new ScanDiagnostic(
                             ScanDiagnosticKind.UnsupportedEntrySkipped,
                             child.Value));
+                    continue;
+                }
+
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    subdirectories?.Add(child);
                     continue;
                 }
 
@@ -196,7 +245,6 @@ public sealed class PhysicalFileScanner : IFileScanner
                 continue;
             }
 
-            subdirectories.Sort(_pathPolicy.DeterministicComparer);
             cancellationToken.ThrowIfCancellationRequested();
             for (int index = subdirectories.Count - 1; index >= 0; index--)
             {
@@ -205,7 +253,7 @@ public sealed class PhysicalFileScanner : IFileScanner
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        return Build(sourceRoot, files, diagnostics);
+        return Build(sourceRoot, files, diagnostics, cancellationToken);
     }
 
     private List<string> ReadDirectoryChildren(
@@ -283,7 +331,6 @@ public sealed class PhysicalFileScanner : IFileScanner
                 cancellationToken);
         }
 
-        children.Sort(StringComparer.Ordinal);
         cancellationToken.ThrowIfCancellationRequested();
         return children;
     }
@@ -343,8 +390,36 @@ public sealed class PhysicalFileScanner : IFileScanner
     {
         try
         {
-            ReadOnlyFileMetadata metadata = _probe.ReadFileMetadata(path.Value);
+            ReadOnlyFileSnapshot snapshot = _probe.ReadFileSnapshot(path.Value);
             cancellationToken.ThrowIfCancellationRequested();
+
+            if ((snapshot.Attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                diagnostics.Add(
+                    new ScanDiagnostic(ScanDiagnosticKind.ReparsePointSkipped, path.Value));
+                return;
+            }
+
+            if ((snapshot.Attributes & FileAttributes.Directory) != 0)
+            {
+                diagnostics.Add(
+                    new ScanDiagnostic(ScanDiagnosticKind.EntryChanged, path.Value));
+                return;
+            }
+
+            if ((snapshot.Attributes & UnsupportedAttributes) != 0)
+            {
+                diagnostics.Add(
+                    new ScanDiagnostic(ScanDiagnosticKind.UnsupportedEntrySkipped, path.Value));
+                return;
+            }
+
+            if (snapshot.Metadata is not ReadOnlyFileMetadata metadata)
+            {
+                diagnostics.Add(
+                    new ScanDiagnostic(ScanDiagnosticKind.MetadataReadFailed, path.Value));
+                return;
+            }
 
             files.Add(
                 new FileEntry(
@@ -416,6 +491,26 @@ public sealed class PhysicalFileScanner : IFileScanner
     private static FileScanResult Build(
         CanonicalPath sourceRoot,
         List<FileEntry> files,
-        List<ScanDiagnostic> diagnostics) =>
-        new(sourceRoot, files, diagnostics);
+        List<ScanDiagnostic> diagnostics,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        FileScanResult result = new(sourceRoot, files, diagnostics, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        return result;
+    }
+
+    private static PathPolicy RequireWindows(PathPolicy pathPolicy)
+    {
+        ArgumentNullException.ThrowIfNull(pathPolicy);
+
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "Physical scanning is Windows-only in M3A because System.IO cannot "
+                + "portably distinguish regular POSIX files from sockets and FIFOs.");
+        }
+
+        return pathPolicy;
+    }
 }

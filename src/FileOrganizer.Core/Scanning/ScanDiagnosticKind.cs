@@ -22,6 +22,9 @@ public enum ScanDiagnosticKind
     /// <summary>An entry disappeared after it was discovered.</summary>
     EntryDisappeared,
 
+    /// <summary>An entry changed type after it was discovered.</summary>
+    EntryChanged,
+
     /// <summary>A directory could not be enumerated completely.</summary>
     DirectoryEnumerationFailed,
 

@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using FileOrganizer.Core.Collections;
 using FileOrganizer.Core.Files;
 using FileOrganizer.Core.Paths;
 
@@ -13,46 +14,46 @@ public sealed class FileScanResult
     /// <param name="canonicalRoot">The canonical lexical source root.</param>
     /// <param name="files">Every regular file whose metadata was read.</param>
     /// <param name="diagnostics">Every entry that could not be accounted for.</param>
+    /// <param name="cancellationToken">
+    /// Stops immutable materialization and ordering without returning a partial result.
+    /// </param>
     public FileScanResult(
         CanonicalPath canonicalRoot,
         IEnumerable<FileEntry> files,
-        IEnumerable<ScanDiagnostic> diagnostics)
+        IEnumerable<ScanDiagnostic> diagnostics,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(canonicalRoot);
-        ArgumentNullException.ThrowIfNull(files);
-        ArgumentNullException.ThrowIfNull(diagnostics);
+        cancellationToken.ThrowIfCancellationRequested();
 
-        FileEntry[] fileSnapshot = [.. files];
-        ScanDiagnostic[] diagnosticSnapshot = [.. diagnostics];
-
-        foreach (FileEntry file in fileSnapshot)
-        {
-            ArgumentNullException.ThrowIfNull(file, nameof(files));
-        }
-
-        foreach (ScanDiagnostic diagnostic in diagnosticSnapshot)
-        {
-            ArgumentNullException.ThrowIfNull(diagnostic, nameof(diagnostics));
-        }
+        FileEntry[] fileSnapshot = CancellationAwareCollection.Snapshot(
+            files,
+            nameof(files),
+            cancellationToken);
+        ScanDiagnostic[] diagnosticSnapshot = CancellationAwareCollection.Snapshot(
+            diagnostics,
+            nameof(diagnostics),
+            cancellationToken);
 
         PathPolicy orderingPolicy = new(
             canonicalRoot.Semantics.Syntax,
             canonicalRoot.Semantics.CaseSensitivity,
             canonicalRoot.Semantics.UnicodeNormalization);
 
+        CancellationAwareCollection.Sort(
+            fileSnapshot,
+            new FileComparer(orderingPolicy),
+            cancellationToken);
+        CancellationAwareCollection.Sort(
+            diagnosticSnapshot,
+            DiagnosticComparer.Instance,
+            cancellationToken);
+
+        cancellationToken.ThrowIfCancellationRequested();
         CanonicalRoot = canonicalRoot;
-        _files = Array.AsReadOnly(
-            fileSnapshot
-                .OrderBy(file => file.Path, orderingPolicy.DeterministicComparer)
-                .ThenBy(file => file.SizeInBytes)
-                .ThenBy(file => file.CreatedUtc)
-                .ThenBy(file => file.ModifiedUtc)
-                .ToArray());
-        _diagnostics = Array.AsReadOnly(
-            diagnosticSnapshot
-                .OrderBy(diagnostic => diagnostic.AffectedPath, StringComparer.Ordinal)
-                .ThenBy(diagnostic => diagnostic.Kind)
-                .ToArray());
+        _files = Array.AsReadOnly(fileSnapshot);
+        _diagnostics = Array.AsReadOnly(diagnosticSnapshot);
+        cancellationToken.ThrowIfCancellationRequested();
     }
 
     /// <summary>Gets the canonical source root.</summary>
@@ -72,4 +73,68 @@ public sealed class FileScanResult
     /// completeness is derived rather than accepted as a contradictory flag.
     /// </remarks>
     public bool IsComplete => _diagnostics.Count == 0;
+
+    private sealed class FileComparer(PathPolicy policy) : IComparer<FileEntry>
+    {
+        public int Compare(FileEntry? left, FileEntry? right)
+        {
+            if (ReferenceEquals(left, right))
+            {
+                return 0;
+            }
+
+            if (left is null)
+            {
+                return -1;
+            }
+
+            if (right is null)
+            {
+                return 1;
+            }
+
+            int path = policy.DeterministicComparer.Compare(left.Path, right.Path);
+            if (path != 0)
+            {
+                return path;
+            }
+
+            int length = left.SizeInBytes.CompareTo(right.SizeInBytes);
+            if (length != 0)
+            {
+                return length;
+            }
+
+            int created = Nullable.Compare(left.CreatedUtc, right.CreatedUtc);
+            return created != 0
+                ? created
+                : left.ModifiedUtc.CompareTo(right.ModifiedUtc);
+        }
+    }
+
+    private sealed class DiagnosticComparer : IComparer<ScanDiagnostic>
+    {
+        public static DiagnosticComparer Instance { get; } = new();
+
+        public int Compare(ScanDiagnostic? left, ScanDiagnostic? right)
+        {
+            if (ReferenceEquals(left, right))
+            {
+                return 0;
+            }
+
+            if (left is null)
+            {
+                return -1;
+            }
+
+            if (right is null)
+            {
+                return 1;
+            }
+
+            int path = StringComparer.Ordinal.Compare(left.AffectedPath, right.AffectedPath);
+            return path != 0 ? path : left.Kind.CompareTo(right.Kind);
+        }
+    }
 }

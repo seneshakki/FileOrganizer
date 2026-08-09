@@ -10,10 +10,19 @@ internal interface IReadOnlyFileSystemProbe
 
     IEnumerable<string> EnumerateEntries(string directoryPath);
 
-    ReadOnlyFileMetadata ReadFileMetadata(string path);
+    ReadOnlyFileSnapshot ReadFileSnapshot(string path);
 }
 
 internal readonly record struct ReadOnlyFileMetadata(
     long Length,
     DateTimeOffset? CreatedUtc,
     DateTimeOffset ModifiedUtc);
+
+/// <summary>
+/// A second attribute observation taken immediately beside metadata capture.
+/// Metadata is absent when that observation shows an unsafe entry type, so the
+/// adapter never proceeds to file metadata through a known link/device.
+/// </summary>
+internal readonly record struct ReadOnlyFileSnapshot(
+    FileAttributes Attributes,
+    ReadOnlyFileMetadata? Metadata);

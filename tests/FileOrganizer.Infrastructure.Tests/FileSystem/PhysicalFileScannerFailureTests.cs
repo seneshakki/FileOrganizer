@@ -84,7 +84,7 @@ public sealed class PhysicalFileScannerFailureTests
         CanonicalPath root = Root();
         string file = Child(root, "unreadable.txt");
         FakeReadOnlyFileSystemProbe probe = RegularFileProbe(root, file);
-        probe.ReadFileMetadataHandler = _ => throw new IOException("simulated failure");
+        probe.ReadFileSnapshotHandler = _ => throw new IOException("simulated failure");
         PhysicalFileScanner scanner = new(_paths, probe);
 
         FileScanResult result = scanner.Scan(
@@ -125,6 +125,116 @@ public sealed class PhysicalFileScannerFailureTests
         Assert.Empty(result.Files);
         Assert.Equal(ScanDiagnosticKind.ReparsePointSkipped, diagnostic.Kind);
         Assert.Equal(link, diagnostic.AffectedPath);
+    }
+
+    [Fact]
+    public void RejectsAnEntryThatBecomesAReparsePointBesideMetadataCapture()
+    {
+        CanonicalPath root = Root();
+        string changed = Child(root, "changed.txt");
+        FakeReadOnlyFileSystemProbe probe = RegularFileProbe(root, changed);
+        probe.ReadFileSnapshotHandler = _ =>
+            new ReadOnlyFileSnapshot(FileAttributes.ReparsePoint, null);
+        PhysicalFileScanner scanner = new(_paths, probe);
+
+        FileScanResult result = scanner.Scan(
+            root,
+            recursive: false,
+            TestContext.Current.CancellationToken);
+
+        Assert.False(result.IsComplete);
+        Assert.Empty(result.Files);
+        Assert.Equal(
+            ScanDiagnosticKind.ReparsePointSkipped,
+            Assert.Single(result.Diagnostics).Kind);
+    }
+
+    [Fact]
+    public void ReportsAnUnsupportedDirectoryEvenWhenRecursionIsDisabled()
+    {
+        CanonicalPath root = Root();
+        string unsupported = Child(root, "device-directory");
+        FakeReadOnlyFileSystemProbe probe = new()
+        {
+            GetAttributesHandler = path => path == root.Value
+                ? FileAttributes.Directory
+                : FileAttributes.Directory | FileAttributes.Device,
+            EnumerateEntriesHandler = _ => [unsupported],
+        };
+        PhysicalFileScanner scanner = new(_paths, probe);
+
+        FileScanResult result = scanner.Scan(
+            root,
+            recursive: false,
+            TestContext.Current.CancellationToken);
+
+        Assert.False(result.IsComplete);
+        Assert.Empty(result.Files);
+        Assert.Equal(
+            ScanDiagnosticKind.UnsupportedEntrySkipped,
+            Assert.Single(result.Diagnostics).Kind);
+    }
+
+    [Fact]
+    public void ReportsAFileThatBecomesADirectoryAsChanged()
+    {
+        CanonicalPath root = Root();
+        string changed = Child(root, "changed.txt");
+        FakeReadOnlyFileSystemProbe probe = RegularFileProbe(root, changed);
+        probe.ReadFileSnapshotHandler = _ =>
+            new ReadOnlyFileSnapshot(FileAttributes.Directory, null);
+        PhysicalFileScanner scanner = new(_paths, probe);
+
+        FileScanResult result = scanner.Scan(
+            root,
+            recursive: false,
+            TestContext.Current.CancellationToken);
+
+        Assert.False(result.IsComplete);
+        Assert.Empty(result.Files);
+        Assert.Equal(
+            ScanDiagnosticKind.EntryChanged,
+            Assert.Single(result.Diagnostics).Kind);
+    }
+
+    [Fact]
+    public void RechecksAQueuedDirectoryAndDoesNotFollowItIfItBecomesAReparsePoint()
+    {
+        CanonicalPath root = Root();
+        string childDirectory = Child(root, "changing-directory");
+        int childAttributeReads = 0;
+        FakeReadOnlyFileSystemProbe probe = new()
+        {
+            GetAttributesHandler = path =>
+            {
+                if (path == root.Value)
+                {
+                    return FileAttributes.Directory;
+                }
+
+                childAttributeReads++;
+                return childAttributeReads == 1
+                    ? FileAttributes.Directory
+                    : FileAttributes.Directory | FileAttributes.ReparsePoint;
+            },
+            EnumerateEntriesHandler = path => path == root.Value
+                ? [childDirectory]
+                : throw new InvalidOperationException(
+                    "A directory that became a reparse point must not be followed."),
+        };
+        PhysicalFileScanner scanner = new(_paths, probe);
+
+        FileScanResult result = scanner.Scan(
+            root,
+            recursive: true,
+            TestContext.Current.CancellationToken);
+
+        Assert.False(result.IsComplete);
+        Assert.Empty(result.Files);
+        Assert.Equal(2, childAttributeReads);
+        Assert.Equal(
+            ScanDiagnosticKind.ReparsePointSkipped,
+            Assert.Single(result.Diagnostics).Kind);
     }
 
     [Fact]
@@ -173,7 +283,7 @@ public sealed class PhysicalFileScannerFailureTests
         Assert.Equal(
             ScanDiagnosticKind.InvalidEntryPath,
             Assert.Single(result.Diagnostics).Kind);
-        Assert.Equal(1, probe.AttributeReadCount);
+        Assert.Equal(2, probe.AttributeReadCount);
     }
 
     [Fact]
@@ -194,7 +304,7 @@ public sealed class PhysicalFileScannerFailureTests
             () => scanner.Scan(root, recursive: true, cancellation.Token));
 
         Assert.Equal(cancellation.Token, exception.CancellationToken);
-        Assert.Equal(1, probe.AttributeReadCount);
+        Assert.Equal(2, probe.AttributeReadCount);
         Assert.Equal(0, probe.MetadataReadCount);
     }
 
@@ -229,7 +339,10 @@ public sealed class PhysicalFileScannerFailureTests
                 ? FileAttributes.Directory
                 : FileAttributes.Normal,
             EnumerateEntriesHandler = _ => [file],
-            ReadFileMetadataHandler = _ => new ReadOnlyFileMetadata(10, null, Modified),
+            ReadFileSnapshotHandler = _ =>
+                new ReadOnlyFileSnapshot(
+                    FileAttributes.Normal,
+                    new ReadOnlyFileMetadata(10, null, Modified)),
         };
 
     private CanonicalPath Root()
@@ -274,7 +387,7 @@ public sealed class PhysicalFileScannerFailureTests
         public Func<string, IEnumerable<string>> EnumerateEntriesHandler { get; set; } =
             _ => throw new InvalidOperationException("No enumeration was configured.");
 
-        public Func<string, ReadOnlyFileMetadata> ReadFileMetadataHandler { get; set; } =
+        public Func<string, ReadOnlyFileSnapshot> ReadFileSnapshotHandler { get; set; } =
             _ => throw new InvalidOperationException("No metadata read was configured.");
 
         public int AttributeReadCount { get; private set; }
@@ -290,10 +403,10 @@ public sealed class PhysicalFileScannerFailureTests
         public IEnumerable<string> EnumerateEntries(string directoryPath) =>
             EnumerateEntriesHandler(directoryPath);
 
-        public ReadOnlyFileMetadata ReadFileMetadata(string path)
+        public ReadOnlyFileSnapshot ReadFileSnapshot(string path)
         {
             MetadataReadCount++;
-            return ReadFileMetadataHandler(path);
+            return ReadFileSnapshotHandler(path);
         }
     }
 }

@@ -12,6 +12,11 @@ public sealed class PhysicalFileScannerTests
 {
     private readonly PathPolicy _paths = HostPathPolicy();
 
+    public PhysicalFileScannerTests() =>
+        Assert.SkipUnless(
+            OperatingSystem.IsWindows(),
+            "The M3A physical adapter is intentionally Windows-only.");
+
     [Fact]
     public void ReturnsFilesAndCanonicalRootWithoutChangingTheDirectory()
     {

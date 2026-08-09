@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using FileOrganizer.Core.Collections;
 using FileOrganizer.Core.Paths;
 
 namespace FileOrganizer.Core.Planning;
@@ -14,21 +15,30 @@ public sealed class DestinationStateSnapshot
 {
     private readonly ReadOnlyCollection<DestinationPathFact> _facts;
 
+    /// <param name="pathSemantics">The explicit semantics shared by every path.</param>
+    /// <param name="facts">The read-only destination observations to snapshot.</param>
+    /// <param name="cancellationToken">
+    /// Stops immutable materialization and ordering without returning a partial snapshot.
+    /// </param>
     public DestinationStateSnapshot(
         PathSemantics pathSemantics,
-        IEnumerable<DestinationPathFact> facts)
+        IEnumerable<DestinationPathFact> facts,
+        CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(facts);
+        cancellationToken.ThrowIfCancellationRequested();
 
         PathPolicy policy = new(
             pathSemantics.Syntax,
             pathSemantics.CaseSensitivity,
             pathSemantics.UnicodeNormalization);
 
-        DestinationPathFact[] materialized = [.. facts];
+        DestinationPathFact[] materialized = CancellationAwareCollection.Snapshot(
+            facts,
+            nameof(facts),
+            cancellationToken);
         foreach (DestinationPathFact fact in materialized)
         {
-            ArgumentNullException.ThrowIfNull(fact, nameof(facts));
+            cancellationToken.ThrowIfCancellationRequested();
 
             if (fact.Path.Semantics != pathSemantics)
             {
@@ -38,10 +48,15 @@ public sealed class DestinationStateSnapshot
             }
         }
 
-        Array.Sort(materialized, new FactComparer(policy));
+        CancellationAwareCollection.Sort(
+            materialized,
+            new FactComparer(policy),
+            cancellationToken);
 
+        cancellationToken.ThrowIfCancellationRequested();
         PathSemantics = pathSemantics;
         _facts = Array.AsReadOnly(materialized);
+        cancellationToken.ThrowIfCancellationRequested();
     }
 
     /// <summary>Gets the explicit lexical semantics shared by every fact.</summary>
