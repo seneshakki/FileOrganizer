@@ -165,6 +165,58 @@ public sealed class PathPolicyTests
     }
 
     [Fact]
+    public void LogicalKeyCollapsesExactlyTheCaseAndUnicodeEquivalenceDeclaredByPolicy()
+    {
+        const string composed = "Caf\u00e9.txt";
+        const string decomposed = "cafe\u0301.TXT";
+        PathPolicy policy = Windows(
+            PathCaseSensitivity.Insensitive,
+            PathUnicodeNormalization.FormC);
+        CanonicalPath first = Canonical(policy, @"C:\Data\" + composed);
+        CanonicalPath second = Canonical(policy, @"c:\data\" + decomposed);
+
+        Assert.True(policy.AreEquivalent(first, second));
+        Assert.Equal(
+            policy.GetDeterministicLogicalKey(first),
+            policy.GetDeterministicLogicalKey(second));
+    }
+
+    [Fact]
+    public void LogicalKeyPreservesDifferencesExcludedFromTheSelectedEquivalencePolicy()
+    {
+        const string composed = "caf\u00e9.txt";
+        const string decomposed = "cafe\u0301.txt";
+        PathPolicy policy = Posix(
+            PathCaseSensitivity.Sensitive,
+            PathUnicodeNormalization.None);
+        CanonicalPath first = Canonical(policy, "/data/Report-" + composed);
+        CanonicalPath differentCase = Canonical(policy, "/data/report-" + composed);
+        CanonicalPath differentUnicode = Canonical(policy, "/data/Report-" + decomposed);
+
+        Assert.False(policy.AreEquivalent(first, differentCase));
+        Assert.False(policy.AreEquivalent(first, differentUnicode));
+        Assert.NotEqual(
+            policy.GetDeterministicLogicalKey(first),
+            policy.GetDeterministicLogicalKey(differentCase));
+        Assert.NotEqual(
+            policy.GetDeterministicLogicalKey(first),
+            policy.GetDeterministicLogicalKey(differentUnicode));
+    }
+
+    [Fact]
+    public void LogicalKeyRejectsAPathFromDifferentSemantics()
+    {
+        PathPolicy insensitive = Windows(PathCaseSensitivity.Insensitive);
+        PathPolicy sensitive = Windows(PathCaseSensitivity.Sensitive);
+        CanonicalPath sensitivePath = Canonical(sensitive, @"C:\Data\report.txt");
+
+        ArgumentException exception = Assert.Throws<ArgumentException>(
+            () => insensitive.GetDeterministicLogicalKey(sensitivePath));
+
+        Assert.Equal("path", exception.ParamName);
+    }
+
+    [Fact]
     public void DeterministicComparerUsesOrdinalSpellingAsLogicalTieBreaker()
     {
         PathPolicy policy = Windows(PathCaseSensitivity.Insensitive);

@@ -1,10 +1,12 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/FileOrganizer.App/FileOrganizer.App.csproj" />
+    <Project Path="src/FileOrganizer.Application/FileOrganizer.Application.csproj" />
     <Project Path="src/FileOrganizer.Core/FileOrganizer.Core.csproj" />
     <Project Path="src/FileOrganizer.Infrastructure/FileOrganizer.Infrastructure.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/FileOrganizer.Application.Tests/FileOrganizer.Application.Tests.csproj" />
     <Project Path="tests/FileOrganizer.Core.Tests/FileOrganizer.Core.Tests.csproj" />
     <Project Path="tests/FileOrganizer.Infrastructure.Tests/FileOrganizer.Infrastructure.Tests.csproj" />
   </Folder>

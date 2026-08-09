@@ -197,6 +197,30 @@ public sealed class PathPolicy
     }
 
     /// <summary>
+    /// Gets a stable, culture-independent representative of this policy's
+    /// logical path identity. Equivalent paths always produce the same key.
+    /// </summary>
+    /// <remarks>
+    /// The key is intended for deterministic hashing and grouping, not for
+    /// addressing the physical file system or for display.
+    /// </remarks>
+    public string GetDeterministicLogicalKey(CanonicalPath path)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+
+        if (path.Semantics != Semantics)
+        {
+            throw new ArgumentException(
+                "The path was canonicalized under a different path policy.",
+                nameof(path));
+        }
+
+        return Semantics.CaseSensitivity == PathCaseSensitivity.Sensitive
+            ? path.ComparisonValue
+            : path.ComparisonValue.ToUpperInvariant();
+    }
+
+    /// <summary>
     /// Validates the portable minimum for one literal file name, plus explicit
     /// restrictions of the selected syntax.
     /// </summary>
