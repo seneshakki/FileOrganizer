@@ -88,6 +88,7 @@ public sealed class PathPolicyTests
     [Theory]
     [InlineData("data/file.txt", PathProblemKind.NotFullyQualified)]
     [InlineData("/../file.txt", PathProblemKind.TraversesAboveRoot)]
+    [InlineData("//implementation-defined/file.txt", PathProblemKind.UnsupportedPathForm)]
     [InlineData("/data/bad\0name", PathProblemKind.ContainsNull)]
     public void RejectsUnsafePosixPaths(string input, PathProblemKind expectedProblem)
     {

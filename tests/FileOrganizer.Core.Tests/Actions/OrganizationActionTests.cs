@@ -1,3 +1,4 @@
+using System.Reflection;
 using FileOrganizer.Core.Actions;
 using FileOrganizer.Core.Paths;
 
@@ -116,5 +117,15 @@ public sealed class OrganizationActionTests
 
         Assert.Throws<NotSupportedException>(() => list.Clear());
         Assert.Single(action.Validate(Posix));
+    }
+
+    [Fact]
+    public void ActionSurfaceCannotBeExtendedOutsideCore()
+    {
+        ConstructorInfo constructor = Assert.Single(
+            typeof(OrganizationAction).GetConstructors(
+                BindingFlags.Instance | BindingFlags.NonPublic));
+
+        Assert.True(constructor.IsFamilyAndAssembly);
     }
 }

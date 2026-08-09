@@ -320,6 +320,17 @@ public sealed class PathPolicy
                 "A POSIX path must begin at the slash root.");
         }
 
+        // POSIX permits an implementation to assign special meaning to exactly
+        // two leading slashes. Collapsing that spelling could make Core's
+        // canonical path address a different physical location than the host.
+        if (path.StartsWith("//", StringComparison.Ordinal)
+            && !path.StartsWith("///", StringComparison.Ordinal))
+        {
+            return Failure(
+                PathProblemKind.UnsupportedPathForm,
+                "POSIX paths with exactly two leading slashes are not supported.");
+        }
+
         return CanonicalizeParts("/", path[1..], '/');
     }
 

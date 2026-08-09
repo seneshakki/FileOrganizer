@@ -5,6 +5,10 @@ namespace FileOrganizer.Core.Actions;
 /// <summary>A read-only organization intent. Actions in Core never execute file operations.</summary>
 public abstract class OrganizationAction
 {
+    private protected OrganizationAction()
+    {
+    }
+
     /// <summary>Gets the kind of intent.</summary>
     public abstract OrganizationActionKind Kind { get; }
 
