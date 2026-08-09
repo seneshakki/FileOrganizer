@@ -1,3 +1,5 @@
+using FileOrganizer.Core.Paths;
+
 namespace FileOrganizer.Core.Files;
 
 /// <summary>
@@ -9,26 +11,20 @@ namespace FileOrganizer.Core.Files;
 /// a snapshot can be stale by the time an operation actually runs. Whoever
 /// executes an operation is responsible for re-verifying the file first.
 ///
-/// Core verifies only lexical invariants: the path is fully qualified in the
-/// host platform's format and its final component is exactly <see cref="Name"/>.
-/// The snapshot producer is responsible for confirming that the path denotes a
-/// real regular file and that the metadata came from it. Core does not access
-/// the file system, resolve links, enforce filesystem-specific naming rules or
-/// establish containment within a root. Timestamp order is not constrained:
-/// copying, restoration and clock skew can all produce surprising but real
-/// combinations.
+/// The path has already been canonicalized under explicit lexical semantics;
+/// <see cref="Name"/> is derived from it rather than accepted as a second,
+/// potentially inconsistent source of truth. The snapshot producer remains
+/// responsible for confirming that the path denotes a real regular file and
+/// that the metadata came from it. Core does not access the file system or
+/// resolve links. Timestamp order is not constrained: copying, restoration and
+/// clock skew can all produce surprising but real combinations.
 /// </remarks>
 public sealed class FileEntry
 {
     /// <summary>
     /// Creates a snapshot of a file.
     /// </summary>
-    /// <param name="fullPath">
-    /// Absolute path of the file in the host platform's own format.
-    /// </param>
-    /// <param name="name">
-    /// File name including its extension, with no directory part.
-    /// </param>
+    /// <param name="path">The canonical, fully qualified path of the file.</param>
     /// <param name="sizeInBytes">Size of the file in bytes.</param>
     /// <param name="created">
     /// Creation timestamp reported by the file system, or <see langword="null"/>
@@ -36,47 +32,21 @@ public sealed class FileEntry
     /// </param>
     /// <param name="modified">Last write timestamp reported by the file system.</param>
     public FileEntry(
-        string fullPath,
-        string name,
+        CanonicalPath path,
         long sizeInBytes,
         DateTimeOffset? created,
         DateTimeOffset modified)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(fullPath);
-        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentNullException.ThrowIfNull(path);
         ArgumentOutOfRangeException.ThrowIfNegative(sizeInBytes);
 
-        if (fullPath.Contains('\0'))
+        if (path.IsRoot)
         {
-            throw new ArgumentException("A file path cannot contain a null character.", nameof(fullPath));
+            throw new ArgumentException("A file path must include a file name.", nameof(path));
         }
 
-        if (name.Contains('\0'))
-        {
-            throw new ArgumentException("A file name cannot contain a null character.", nameof(name));
-        }
-
-        if (!Path.IsPathFullyQualified(fullPath))
-        {
-            throw new ArgumentException("A file path must be fully qualified.", nameof(fullPath));
-        }
-
-        if (name is "." or ".." || !string.Equals(Path.GetFileName(name), name, StringComparison.Ordinal))
-        {
-            throw new ArgumentException(
-                "A file name must be a single file name with no directory part.",
-                nameof(name));
-        }
-
-        if (!string.Equals(Path.GetFileName(fullPath), name, StringComparison.Ordinal))
-        {
-            throw new ArgumentException(
-                "The file name must exactly match the final component of the full path.",
-                nameof(name));
-        }
-
-        FullPath = fullPath;
-        Name = name;
+        Path = path;
+        Name = path.FileName!;
         SizeInBytes = sizeInBytes;
 
         // Normalized on the way in, so a rule comparing dates can never depend
@@ -84,21 +54,24 @@ public sealed class FileEntry
         CreatedUtc = created?.ToUniversalTime();
         ModifiedUtc = modified.ToUniversalTime();
 
-        int extensionStart = FindExtensionStart(name);
+        int extensionStart = FindExtensionStart(Name);
         if (extensionStart < 0)
         {
-            NameWithoutExtension = name;
+            NameWithoutExtension = Name;
             Extension = string.Empty;
         }
         else
         {
-            NameWithoutExtension = name[..extensionStart];
-            Extension = name[extensionStart..];
+            NameWithoutExtension = Name[..extensionStart];
+            Extension = Name[extensionStart..];
         }
     }
 
-    /// <summary>Gets the fully qualified path of the file.</summary>
-    public string FullPath { get; }
+    /// <summary>Gets the canonical, fully qualified path of the file.</summary>
+    public CanonicalPath Path { get; }
+
+    /// <summary>Gets the canonical path spelling for display and audit output.</summary>
+    public string FullPath => Path.Value;
 
     /// <summary>Gets the file name including its extension.</summary>
     public string Name { get; }

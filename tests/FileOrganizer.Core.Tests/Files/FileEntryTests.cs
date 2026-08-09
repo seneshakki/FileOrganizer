@@ -1,4 +1,5 @@
 using FileOrganizer.Core.Files;
+using FileOrganizer.Core.Paths;
 
 namespace FileOrganizer.Core.Tests.Files;
 
@@ -29,8 +30,6 @@ public sealed class FileEntryTests
     [InlineData(".editorconfig")]
     public void TreatsDotfileAsHavingNoExtension(string name)
     {
-        // Path.GetExtension would report ".gitignore" as an extension, which
-        // would file every dotfile under a folder named after itself.
         FileEntry entry = CreateEntry(name: name);
 
         Assert.Equal(string.Empty, entry.Extension);
@@ -38,7 +37,7 @@ public sealed class FileEntryTests
     }
 
     [Fact]
-    public void TreatsTrailingDotAsHavingNoExtension()
+    public void TreatsTrailingDotAsHavingNoExtensionUnderPosixPolicy()
     {
         FileEntry entry = CreateEntry(name: "report.");
 
@@ -58,14 +57,21 @@ public sealed class FileEntryTests
     [Fact]
     public void PreservesTheCaseOfTheExtension()
     {
-        // Whether ".PDF" matches a ".pdf" rule is the matcher's decision.
-        // Folding case here would be lossy, and a culture-aware fold would
-        // additionally be wrong on a Turkish locale, where "I" lower-cases to
-        // a dotless "i".
         FileEntry entry = CreateEntry(name: "INVOICE.PDF");
 
         Assert.Equal("INVOICE", entry.NameWithoutExtension);
         Assert.Equal(".PDF", entry.Extension);
+    }
+
+    [Fact]
+    public void DerivesNameFromCanonicalPath()
+    {
+        CanonicalPath path = TestFiles.CanonicalPathFor("quarterly/report.pdf");
+        FileEntry entry = CreateEntry(path: path);
+
+        Assert.Same(path, entry.Path);
+        Assert.Equal("/test-inbox/quarterly/report.pdf", entry.FullPath);
+        Assert.Equal("report.pdf", entry.Name);
     }
 
     [Fact]
@@ -84,20 +90,14 @@ public sealed class FileEntryTests
         Assert.Equal(TimeSpan.Zero, createdUtc.Offset);
         Assert.Equal(TimeSpan.Zero, entry.ModifiedUtc.Offset);
         Assert.Equal(6, createdUtc.Hour);
-
-        // Normalizing must not shift the instant, only its representation.
         Assert.Equal(createdInLocalOffset, createdUtc);
     }
 
     [Fact]
     public void KeepsAnUnreportedCreationTimeAsUnknown()
     {
-        // Some platforms do not record when a file was created. The absence has
-        // to survive into the model, because substituting any real timestamp
-        // would let a date rule act on a number nobody measured.
         FileEntry entry = new(
-            TestFiles.FullPathFor("report.pdf"),
-            "report.pdf",
+            TestFiles.CanonicalPathFor("report.pdf"),
             1024,
             null,
             SampleInstant);
@@ -106,17 +106,13 @@ public sealed class FileEntryTests
     }
 
     [Fact]
-    public void KeepsTheValuesItWasGiven()
+    public void KeepsTheMetadataItWasGiven()
     {
-        string fullPath = TestFiles.FullPathFor(Path.Combine("quarterly", "report.pdf"));
-        FileEntry entry = CreateEntry(
-            fullPath: fullPath,
-            name: "report.pdf",
-            sizeInBytes: 4096);
+        FileEntry entry = CreateEntry(sizeInBytes: 4096);
 
-        Assert.Equal(fullPath, entry.FullPath);
-        Assert.Equal("report.pdf", entry.Name);
         Assert.Equal(4096, entry.SizeInBytes);
+        Assert.Equal(SampleInstant, entry.CreatedUtc);
+        Assert.Equal(SampleInstant, entry.ModifiedUtc);
     }
 
     [Fact]
@@ -127,81 +123,20 @@ public sealed class FileEntryTests
         Assert.Equal(0, entry.SizeInBytes);
     }
 
-    [Theory]
-    [InlineData("")]
-    [InlineData("   ")]
-    public void RejectsBlankName(string name)
+    [Fact]
+    public void RejectsAPathWithNoFileName()
     {
-        Assert.Throws<ArgumentException>(() => CreateEntry(name: name));
-    }
+        PathResolution root = TestFiles.Paths.CanonicalizeAbsolute("/");
 
-    [Theory]
-    [InlineData("")]
-    [InlineData("   ")]
-    public void RejectsBlankFullPath(string fullPath)
-    {
-        Assert.Throws<ArgumentException>(() => CreateEntry(fullPath: fullPath));
+        Assert.Throws<ArgumentException>(
+            () => new FileEntry(root.Path!, 0, null, SampleInstant));
     }
 
     [Fact]
-    public void RejectsAPathThatIsNotFullyQualified()
-    {
-        Assert.Throws<ArgumentException>(
-            () => CreateEntry(fullPath: Path.Combine("inbox", "report.pdf")));
-    }
-
-    [Fact]
-    public void RejectsANameWithADirectoryPart()
-    {
-        Assert.Throws<ArgumentException>(
-            () => CreateEntry(name: Path.Combine("nested", "report.pdf")));
-    }
-
-    [Theory]
-    [InlineData(".")]
-    [InlineData("..")]
-    public void RejectsSpecialDirectoryNames(string name)
-    {
-        Assert.Throws<ArgumentException>(() => CreateEntry(name: name));
-    }
-
-    [Fact]
-    public void RejectsANameThatDoesNotMatchThePath()
-    {
-        Assert.Throws<ArgumentException>(
-            () => CreateEntry(
-                name: "other.pdf",
-                fullPath: TestFiles.FullPathFor("report.pdf")));
-    }
-
-    [Fact]
-    public void RejectsNullCharactersThatNoFileSystemCanRepresent()
-    {
-        Assert.Throws<ArgumentException>(
-            () => CreateEntry(fullPath: TestFiles.FullPathFor("report.pdf") + "\0"));
-        Assert.Throws<ArgumentException>(
-            () => CreateEntry(name: "report\0.pdf"));
-    }
-
-    [Fact]
-    public void RejectsNullName()
+    public void RejectsNullPath()
     {
         Assert.Throws<ArgumentNullException>(
-            () => new FileEntry(
-                TestFiles.FullPathFor("report.pdf"),
-                null!,
-                1024,
-                SampleInstant,
-                SampleInstant));
-    }
-
-    [Fact]
-    public void RejectsNullFullPath()
-    {
-        // Constructed directly: the helper treats a null path as "use the
-        // default", so it could not deliver a null to the constructor.
-        Assert.Throws<ArgumentNullException>(
-            () => new FileEntry(null!, "report.pdf", 1024, SampleInstant, SampleInstant));
+            () => new FileEntry(null!, 1024, SampleInstant, SampleInstant));
     }
 
     [Fact]
@@ -212,7 +147,7 @@ public sealed class FileEntryTests
 
     private static FileEntry CreateEntry(
         string name = "report.pdf",
-        string? fullPath = null,
+        CanonicalPath? path = null,
         long sizeInBytes = 1024,
         DateTimeOffset? created = null,
         DateTimeOffset? modified = null)
@@ -220,8 +155,7 @@ public sealed class FileEntryTests
         DateTimeOffset createdAt = created ?? SampleInstant;
 
         return new FileEntry(
-            fullPath ?? TestFiles.FullPathFor(name),
-            name,
+            path ?? TestFiles.CanonicalPathFor(name),
             sizeInBytes,
             createdAt,
             modified ?? createdAt);

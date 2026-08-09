@@ -13,4 +13,8 @@
     <ProjectReference Include="..\FileOrganizer.Core\FileOrganizer.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="FileOrganizer.Infrastructure.Tests" />
+  </ItemGroup>
+
 </Project>

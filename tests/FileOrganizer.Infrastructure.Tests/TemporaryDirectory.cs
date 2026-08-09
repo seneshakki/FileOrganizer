@@ -34,7 +34,30 @@ internal sealed class TemporaryDirectory : IDisposable
     /// </summary>
     public string WriteFile(string relativePath, string content = "")
     {
-        string fullPath = Path.Combine(FullPath, relativePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(relativePath);
+
+        if (Path.IsPathRooted(relativePath))
+        {
+            throw new ArgumentException(
+                "A temporary test file path must be relative.",
+                nameof(relativePath));
+        }
+
+        string root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(FullPath));
+        string fullPath = Path.GetFullPath(Path.Combine(root, relativePath));
+        string rootPrefix = root + Path.DirectorySeparatorChar;
+
+        StringComparison comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+
+        if (!fullPath.StartsWith(rootPrefix, comparison))
+        {
+            throw new ArgumentException(
+                "A temporary test file must remain beneath its temporary directory.",
+                nameof(relativePath));
+        }
+
         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
         File.WriteAllText(fullPath, content);
         return fullPath;
