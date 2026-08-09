@@ -1,3 +1,6 @@
+using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
+
 namespace FileOrganizer.Infrastructure.FileSystem;
 
 /// <summary>
@@ -6,23 +9,9 @@ namespace FileOrganizer.Infrastructure.FileSystem;
 /// </summary>
 internal interface IReadOnlyFileSystemProbe
 {
-    FileAttributes GetAttributes(string path);
+    PhysicalEntryObservation Observe(
+        CanonicalPath path,
+        CancellationToken cancellationToken = default);
 
     IEnumerable<string> EnumerateEntries(string directoryPath);
-
-    ReadOnlyFileSnapshot ReadFileSnapshot(string path);
 }
-
-internal readonly record struct ReadOnlyFileMetadata(
-    long Length,
-    DateTimeOffset? CreatedUtc,
-    DateTimeOffset ModifiedUtc);
-
-/// <summary>
-/// A second attribute observation taken immediately beside metadata capture.
-/// Metadata is absent when that observation shows an unsafe entry type, so the
-/// adapter never proceeds to file metadata through a known link/device.
-/// </summary>
-internal readonly record struct ReadOnlyFileSnapshot(
-    FileAttributes Attributes,
-    ReadOnlyFileMetadata? Metadata);

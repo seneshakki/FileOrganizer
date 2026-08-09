@@ -30,6 +30,10 @@ public sealed class WindowsPhysicalIdentityAdapter
     private const int ErrorNetworkAccessDenied = 65;
     private const int ErrorInvalidParameter = 87;
     private const int ErrorCallNotImplemented = 120;
+    private const int ErrorInvalidName = 123;
+    private const int ErrorBadPathname = 161;
+    private const int ErrorFilenameExceedsRange = 206;
+    private const int ErrorDeletePending = 303;
     private const int ErrorPrivilegeNotHeld = 1314;
 
     private const uint ShareAll = FileShareRead | FileShareWrite | FileShareDelete;
@@ -92,12 +96,17 @@ public sealed class WindowsPhysicalIdentityAdapter
         SafeFileHandle handle,
         CancellationToken cancellationToken)
     {
-        if (GetFileType(handle) != FileTypeDisk)
+        uint fileType = GetFileType(handle);
+        int fileTypeError = fileType == FileTypeUnknown
+            ? Marshal.GetLastPInvokeError()
+            : 0;
+        PhysicalEntryObservation? unsupportedFileType = ClassifyFileType(
+            fileType,
+            fileTypeError);
+        if (unsupportedFileType is not null)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return PhysicalEntryObservation.Unsupported(
-                PhysicalEntryObservationReason.UnsupportedEntryKind,
-                PhysicalEntryKind.Unsupported);
+            return unsupportedFileType;
         }
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -336,6 +345,13 @@ public sealed class WindowsPhysicalIdentityAdapter
             PhysicalEntryObservation.Inaccessible(
                 PhysicalEntryObservationReason.SharingViolation,
                 errorCode),
+        ErrorDeletePending => PhysicalEntryObservation.Inaccessible(
+            PhysicalEntryObservationReason.EntryChanged,
+            errorCode),
+        ErrorInvalidName or ErrorBadPathname or ErrorFilenameExceedsRange =>
+            PhysicalEntryObservation.Unsupported(
+                PhysicalEntryObservationReason.InvalidPath,
+                nativeErrorCode: errorCode),
         ErrorInvalidFunction
             or ErrorNotSupported
             or ErrorInvalidParameter
@@ -353,6 +369,12 @@ public sealed class WindowsPhysicalIdentityAdapter
         PhysicalEntryKind? entryKind = null,
         PhysicalFileMetadata? metadata = null) => errorCode switch
         {
+            ErrorFileNotFound or ErrorPathNotFound or ErrorInvalidDrive or ErrorDeletePending =>
+                PhysicalEntryObservation.Inaccessible(
+                    PhysicalEntryObservationReason.EntryChanged,
+                    errorCode,
+                    entryKind,
+                    metadata),
             ErrorAccessDenied or ErrorNetworkAccessDenied or ErrorPrivilegeNotHeld =>
                 PhysicalEntryObservation.Inaccessible(
                     PhysicalEntryObservationReason.AccessDenied,
@@ -380,6 +402,28 @@ public sealed class WindowsPhysicalIdentityAdapter
                 entryKind,
                 metadata),
         };
+
+    internal static PhysicalEntryObservation? ClassifyFileType(
+        uint fileType,
+        int nativeErrorCode)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(nativeErrorCode);
+
+        if (fileType == FileTypeDisk)
+        {
+            return null;
+        }
+
+        if (fileType == FileTypeUnknown && nativeErrorCode != 0)
+        {
+            return FromHandleQueryFailure(nativeErrorCode);
+        }
+
+        return PhysicalEntryObservation.Unsupported(
+            PhysicalEntryObservationReason.UnsupportedEntryKind,
+            PhysicalEntryKind.Unsupported,
+            nativeErrorCode: nativeErrorCode == 0 ? null : nativeErrorCode);
+    }
 
     private static PhysicalEntryObservation QueryFailureAfterCancellationCheck(
         int errorCode,

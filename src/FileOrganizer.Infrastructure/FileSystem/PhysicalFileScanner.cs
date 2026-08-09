@@ -2,6 +2,7 @@ using System.Security;
 using FileOrganizer.Core.Abstractions;
 using FileOrganizer.Core.Files;
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
 using FileOrganizer.Core.Scanning;
 
 namespace FileOrganizer.Infrastructure.FileSystem;
@@ -9,22 +10,13 @@ namespace FileOrganizer.Infrastructure.FileSystem;
 /// <summary>Scans the host file system without modifying it.</summary>
 /// <remarks>
 /// Traversal is deliberately manual and non-recursive at the System.IO layer.
-/// That lets every inaccessible or disappearing directory become a diagnostic
-/// instead of being silently suppressed by recursive enumeration. Entries
-/// observed as reparse points are reported and not traversed. Attribute
-/// rechecks narrow replacement races, but only handle-based validation in M3B
-/// can close the remaining physical-link TOCTOU window.
-///
-/// The public physical adapter is deliberately Windows-only in M3A. Core path
-/// and planning semantics remain portable, but System.IO does not expose enough
-/// POSIX entry-type information to distinguish a regular file from a socket or
-/// FIFO safely without platform interop. A POSIX adapter is deferred rather
-/// than silently treating those unsupported entries as files.
+/// Every entry is classified through the Windows no-follow handle adapter before
+/// it is treated as an ordinary file or directory. Directory enumeration itself
+/// remains path based, so execution must still perform its own immediate physical
+/// containment and identity revalidation.
 /// </remarks>
 public sealed class PhysicalFileScanner : IFileScanner
 {
-    private const FileAttributes UnsupportedAttributes = FileAttributes.Device;
-
     private readonly PathPolicy _pathPolicy;
     private readonly IReadOnlyFileSystemProbe _probe;
 
@@ -76,119 +68,57 @@ public sealed class PhysicalFileScanner : IFileScanner
         List<FileEntry> files = [];
         List<ScanDiagnostic> diagnostics = [];
 
-        FileAttributes rootAttributes;
-        try
+        PhysicalEntryObservation rootObservation = Observe(sourceRoot, cancellationToken);
+        if (!TryAcceptDirectory(
+                sourceRoot,
+                rootObservation,
+                isRoot: true,
+                diagnostics,
+                out PhysicalEntryIdentity? rootIdentity))
         {
-            rootAttributes = _probe.GetAttributes(sourceRoot.Value);
-            cancellationToken.ThrowIfCancellationRequested();
-        }
-        catch (FileNotFoundException)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            diagnostics.Add(new ScanDiagnostic(ScanDiagnosticKind.RootNotFound, sourceRoot.Value));
-            return Build(sourceRoot, files, diagnostics, cancellationToken);
-        }
-        catch (DirectoryNotFoundException)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            diagnostics.Add(new ScanDiagnostic(ScanDiagnosticKind.RootNotFound, sourceRoot.Value));
-            return Build(sourceRoot, files, diagnostics, cancellationToken);
-        }
-        catch (UnauthorizedAccessException)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            diagnostics.Add(new ScanDiagnostic(ScanDiagnosticKind.AccessDenied, sourceRoot.Value));
-            return Build(sourceRoot, files, diagnostics, cancellationToken);
-        }
-        catch (SecurityException)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            diagnostics.Add(new ScanDiagnostic(ScanDiagnosticKind.AccessDenied, sourceRoot.Value));
-            return Build(sourceRoot, files, diagnostics, cancellationToken);
-        }
-        catch (IOException)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            diagnostics.Add(new ScanDiagnostic(ScanDiagnosticKind.MetadataReadFailed, sourceRoot.Value));
-            return Build(sourceRoot, files, diagnostics, cancellationToken);
-        }
-        catch (NotSupportedException)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            diagnostics.Add(
-                new ScanDiagnostic(ScanDiagnosticKind.UnsupportedEntrySkipped, sourceRoot.Value));
-            return Build(sourceRoot, files, diagnostics, cancellationToken);
+            return Build(
+                sourceRoot,
+                files,
+                diagnostics,
+                rootPhysicalIdentity: null,
+                cancellationToken);
         }
 
-        if ((rootAttributes & FileAttributes.ReparsePoint) != 0)
-        {
-            diagnostics.Add(
-                new ScanDiagnostic(ScanDiagnosticKind.ReparsePointSkipped, sourceRoot.Value));
-            return Build(sourceRoot, files, diagnostics, cancellationToken);
-        }
-
-        if ((rootAttributes & UnsupportedAttributes) != 0)
-        {
-            diagnostics.Add(
-                new ScanDiagnostic(ScanDiagnosticKind.UnsupportedEntrySkipped, sourceRoot.Value));
-            return Build(sourceRoot, files, diagnostics, cancellationToken);
-        }
-
-        if ((rootAttributes & FileAttributes.Directory) == 0)
-        {
-            diagnostics.Add(
-                new ScanDiagnostic(ScanDiagnosticKind.RootIsNotDirectory, sourceRoot.Value));
-            return Build(sourceRoot, files, diagnostics, cancellationToken);
-        }
-
-        Stack<CanonicalPath> pendingDirectories = new();
-        pendingDirectories.Push(sourceRoot);
+        Stack<PendingDirectory> pendingDirectories = new();
+        pendingDirectories.Push(new PendingDirectory(sourceRoot, rootIdentity));
 
         while (pendingDirectories.Count != 0)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            CanonicalPath directory = pendingDirectories.Pop();
-            if (!TryReadAttributes(
-                    directory,
+            PendingDirectory pending = pendingDirectories.Pop();
+            PhysicalEntryObservation directoryObservation =
+                Observe(pending.Path, cancellationToken);
+
+            if (!TryAcceptDirectory(
+                    pending.Path,
+                    directoryObservation,
+                    isRoot: _pathPolicy.AreEquivalent(sourceRoot, pending.Path),
                     diagnostics,
-                    cancellationToken,
-                    out FileAttributes directoryAttributes))
+                    out PhysicalEntryIdentity? currentIdentity))
             {
                 continue;
             }
 
-            if ((directoryAttributes & FileAttributes.ReparsePoint) != 0)
+            if (pending.ExpectedIdentity is not null
+                && (currentIdentity is null || pending.ExpectedIdentity != currentIdentity))
             {
                 diagnostics.Add(
-                    new ScanDiagnostic(
-                        ScanDiagnosticKind.ReparsePointSkipped,
-                        directory.Value));
-                continue;
-            }
-
-            if ((directoryAttributes & UnsupportedAttributes) != 0)
-            {
-                diagnostics.Add(
-                    new ScanDiagnostic(
-                        ScanDiagnosticKind.UnsupportedEntrySkipped,
-                        directory.Value));
-                continue;
-            }
-
-            if ((directoryAttributes & FileAttributes.Directory) == 0)
-            {
-                diagnostics.Add(
-                    new ScanDiagnostic(ScanDiagnosticKind.EntryChanged, directory.Value));
+                    new ScanDiagnostic(ScanDiagnosticKind.EntryChanged, pending.Path.Value));
                 continue;
             }
 
             List<string> children = ReadDirectoryChildren(
-                directory,
+                pending.Path,
                 diagnostics,
                 cancellationToken);
 
-            List<CanonicalPath>? subdirectories = recursive ? [] : null;
+            List<PendingDirectory>? subdirectories = recursive ? [] : null;
 
             foreach (string rawChildPath in children)
             {
@@ -210,34 +140,12 @@ public sealed class PhysicalFileScanner : IFileScanner
                     continue;
                 }
 
-                if (!TryReadAttributes(child, diagnostics, cancellationToken, out FileAttributes attributes))
-                {
-                    continue;
-                }
-
-                if ((attributes & FileAttributes.ReparsePoint) != 0)
-                {
-                    diagnostics.Add(
-                        new ScanDiagnostic(ScanDiagnosticKind.ReparsePointSkipped, child.Value));
-                    continue;
-                }
-
-                if ((attributes & UnsupportedAttributes) != 0)
-                {
-                    diagnostics.Add(
-                        new ScanDiagnostic(
-                            ScanDiagnosticKind.UnsupportedEntrySkipped,
-                            child.Value));
-                    continue;
-                }
-
-                if ((attributes & FileAttributes.Directory) != 0)
-                {
-                    subdirectories?.Add(child);
-                    continue;
-                }
-
-                TryReadFile(child, files, diagnostics, cancellationToken);
+                ProcessChild(
+                    child,
+                    Observe(child, cancellationToken),
+                    files,
+                    subdirectories,
+                    diagnostics);
             }
 
             if (subdirectories is null)
@@ -253,8 +161,185 @@ public sealed class PhysicalFileScanner : IFileScanner
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        return Build(sourceRoot, files, diagnostics, cancellationToken);
+        return Build(
+            sourceRoot,
+            files,
+            diagnostics,
+            rootIdentity,
+            cancellationToken);
     }
+
+    private PhysicalEntryObservation Observe(
+        CanonicalPath path,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            PhysicalEntryObservation observation = _probe.Observe(path, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            return observation;
+        }
+        catch (FileNotFoundException)
+        {
+            return AfterCancellationCheck(
+                PhysicalEntryObservation.Missing(),
+                cancellationToken);
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return AfterCancellationCheck(
+                PhysicalEntryObservation.Missing(),
+                cancellationToken);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return AfterCancellationCheck(
+                PhysicalEntryObservation.Inaccessible(
+                    PhysicalEntryObservationReason.AccessDenied),
+                cancellationToken);
+        }
+        catch (SecurityException)
+        {
+            return AfterCancellationCheck(
+                PhysicalEntryObservation.Inaccessible(
+                    PhysicalEntryObservationReason.AccessDenied),
+                cancellationToken);
+        }
+        catch (IOException)
+        {
+            return AfterCancellationCheck(
+                PhysicalEntryObservation.Inaccessible(
+                    PhysicalEntryObservationReason.InputOutputFailure),
+                cancellationToken);
+        }
+        catch (NotSupportedException)
+        {
+            return AfterCancellationCheck(
+                PhysicalEntryObservation.Unsupported(
+                    PhysicalEntryObservationReason.UnsupportedCapability),
+                cancellationToken);
+        }
+    }
+
+    private static PhysicalEntryObservation AfterCancellationCheck(
+        PhysicalEntryObservation observation,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return observation;
+    }
+
+    private static bool TryAcceptDirectory(
+        CanonicalPath path,
+        PhysicalEntryObservation observation,
+        bool isRoot,
+        List<ScanDiagnostic> diagnostics,
+        out PhysicalEntryIdentity? identity)
+    {
+        identity = observation.Identity;
+
+        if (observation.EntryKind == PhysicalEntryKind.Directory
+            && IsPreviewableOrdinaryEntry(observation))
+        {
+            AddIncompleteObservationDiagnostic(path, observation, diagnostics);
+            return true;
+        }
+
+        ScanDiagnosticKind kind = observation.EntryKind == PhysicalEntryKind.RegularFile
+            && observation.Outcome == PhysicalEntryObservationOutcome.Success
+            ? isRoot
+                ? ScanDiagnosticKind.RootIsNotDirectory
+                : ScanDiagnosticKind.EntryChanged
+            : MapDiagnostic(observation, isRoot);
+
+        diagnostics.Add(new ScanDiagnostic(kind, path.Value));
+        return false;
+    }
+
+    private static void ProcessChild(
+        CanonicalPath path,
+        PhysicalEntryObservation observation,
+        List<FileEntry> files,
+        List<PendingDirectory>? subdirectories,
+        List<ScanDiagnostic> diagnostics)
+    {
+        if (observation.EntryKind == PhysicalEntryKind.Directory
+            && IsPreviewableOrdinaryEntry(observation))
+        {
+            AddIncompleteObservationDiagnostic(path, observation, diagnostics);
+            subdirectories?.Add(new PendingDirectory(path, observation.Identity));
+            return;
+        }
+
+        if (observation.EntryKind == PhysicalEntryKind.RegularFile
+            && IsPreviewableOrdinaryEntry(observation)
+            && observation.FileMetadata is PhysicalFileMetadata metadata)
+        {
+            AddIncompleteObservationDiagnostic(path, observation, diagnostics);
+            files.Add(
+                new FileEntry(
+                    path,
+                    metadata.Length,
+                    metadata.CreatedUtc,
+                    metadata.ModifiedUtc,
+                    observation.Identity));
+            return;
+        }
+
+        diagnostics.Add(new ScanDiagnostic(MapDiagnostic(observation, isRoot: false), path.Value));
+    }
+
+    private static bool IsPreviewableOrdinaryEntry(PhysicalEntryObservation observation) =>
+        observation.Outcome == PhysicalEntryObservationOutcome.Success
+        || (observation.Outcome == PhysicalEntryObservationOutcome.Unsupported
+            && observation.Reason == PhysicalEntryObservationReason.UnsupportedCapability)
+        || (observation.Outcome == PhysicalEntryObservationOutcome.Inaccessible
+            && observation.Reason != PhysicalEntryObservationReason.EntryChanged);
+
+    private static void AddIncompleteObservationDiagnostic(
+        CanonicalPath path,
+        PhysicalEntryObservation observation,
+        List<ScanDiagnostic> diagnostics)
+    {
+        if (observation.Outcome != PhysicalEntryObservationOutcome.Inaccessible)
+        {
+            return;
+        }
+
+        ScanDiagnosticKind kind = MapDiagnostic(observation, isRoot: false);
+        if (!diagnostics.Any(
+                diagnostic => diagnostic.Kind == kind
+                    && StringComparer.Ordinal.Equals(diagnostic.AffectedPath, path.Value)))
+        {
+            diagnostics.Add(new ScanDiagnostic(kind, path.Value));
+        }
+    }
+
+    private static ScanDiagnosticKind MapDiagnostic(
+        PhysicalEntryObservation observation,
+        bool isRoot) => observation.Outcome switch
+        {
+            PhysicalEntryObservationOutcome.Missing => isRoot
+                ? ScanDiagnosticKind.RootNotFound
+                : ScanDiagnosticKind.EntryDisappeared,
+            PhysicalEntryObservationOutcome.Inaccessible => observation.Reason switch
+            {
+                PhysicalEntryObservationReason.AccessDenied => ScanDiagnosticKind.AccessDenied,
+                PhysicalEntryObservationReason.EntryChanged => ScanDiagnosticKind.EntryChanged,
+                _ => ScanDiagnosticKind.MetadataReadFailed,
+            },
+            PhysicalEntryObservationOutcome.Unsupported => observation.Reason switch
+            {
+                PhysicalEntryObservationReason.ReparsePoint =>
+                    ScanDiagnosticKind.ReparsePointSkipped,
+                PhysicalEntryObservationReason.DeletePending => ScanDiagnosticKind.EntryChanged,
+                PhysicalEntryObservationReason.InvalidPath => ScanDiagnosticKind.InvalidEntryPath,
+                PhysicalEntryObservationReason.MetadataUnavailable =>
+                    ScanDiagnosticKind.MetadataReadFailed,
+                _ => ScanDiagnosticKind.UnsupportedEntrySkipped,
+            },
+            _ => ScanDiagnosticKind.EntryChanged,
+        };
 
     private List<string> ReadDirectoryChildren(
         CanonicalPath directory,
@@ -335,149 +420,6 @@ public sealed class PhysicalFileScanner : IFileScanner
         return children;
     }
 
-    private bool TryReadAttributes(
-        CanonicalPath path,
-        List<ScanDiagnostic> diagnostics,
-        CancellationToken cancellationToken,
-        out FileAttributes attributes)
-    {
-        attributes = default;
-
-        try
-        {
-            attributes = _probe.GetAttributes(path.Value);
-            cancellationToken.ThrowIfCancellationRequested();
-            return true;
-        }
-        catch (FileNotFoundException)
-        {
-            return AttributeFailure(ScanDiagnosticKind.EntryDisappeared);
-        }
-        catch (DirectoryNotFoundException)
-        {
-            return AttributeFailure(ScanDiagnosticKind.EntryDisappeared);
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return AttributeFailure(ScanDiagnosticKind.AccessDenied);
-        }
-        catch (SecurityException)
-        {
-            return AttributeFailure(ScanDiagnosticKind.AccessDenied);
-        }
-        catch (IOException)
-        {
-            return AttributeFailure(ScanDiagnosticKind.MetadataReadFailed);
-        }
-        catch (NotSupportedException)
-        {
-            return AttributeFailure(ScanDiagnosticKind.UnsupportedEntrySkipped);
-        }
-
-        bool AttributeFailure(ScanDiagnosticKind kind)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            diagnostics.Add(new ScanDiagnostic(kind, path.Value));
-            return false;
-        }
-    }
-
-    private void TryReadFile(
-        CanonicalPath path,
-        List<FileEntry> files,
-        List<ScanDiagnostic> diagnostics,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            ReadOnlyFileSnapshot snapshot = _probe.ReadFileSnapshot(path.Value);
-            cancellationToken.ThrowIfCancellationRequested();
-
-            if ((snapshot.Attributes & FileAttributes.ReparsePoint) != 0)
-            {
-                diagnostics.Add(
-                    new ScanDiagnostic(ScanDiagnosticKind.ReparsePointSkipped, path.Value));
-                return;
-            }
-
-            if ((snapshot.Attributes & FileAttributes.Directory) != 0)
-            {
-                diagnostics.Add(
-                    new ScanDiagnostic(ScanDiagnosticKind.EntryChanged, path.Value));
-                return;
-            }
-
-            if ((snapshot.Attributes & UnsupportedAttributes) != 0)
-            {
-                diagnostics.Add(
-                    new ScanDiagnostic(ScanDiagnosticKind.UnsupportedEntrySkipped, path.Value));
-                return;
-            }
-
-            if (snapshot.Metadata is not ReadOnlyFileMetadata metadata)
-            {
-                diagnostics.Add(
-                    new ScanDiagnostic(ScanDiagnosticKind.MetadataReadFailed, path.Value));
-                return;
-            }
-
-            files.Add(
-                new FileEntry(
-                    path,
-                    metadata.Length,
-                    metadata.CreatedUtc,
-                    metadata.ModifiedUtc));
-        }
-        catch (FileNotFoundException)
-        {
-            AddAfterCancellationCheck(
-                ScanDiagnosticKind.EntryDisappeared,
-                path.Value,
-                diagnostics,
-                cancellationToken);
-        }
-        catch (DirectoryNotFoundException)
-        {
-            AddAfterCancellationCheck(
-                ScanDiagnosticKind.EntryDisappeared,
-                path.Value,
-                diagnostics,
-                cancellationToken);
-        }
-        catch (UnauthorizedAccessException)
-        {
-            AddAfterCancellationCheck(
-                ScanDiagnosticKind.AccessDenied,
-                path.Value,
-                diagnostics,
-                cancellationToken);
-        }
-        catch (SecurityException)
-        {
-            AddAfterCancellationCheck(
-                ScanDiagnosticKind.AccessDenied,
-                path.Value,
-                diagnostics,
-                cancellationToken);
-        }
-        catch (IOException)
-        {
-            AddAfterCancellationCheck(
-                ScanDiagnosticKind.MetadataReadFailed,
-                path.Value,
-                diagnostics,
-                cancellationToken);
-        }
-        catch (NotSupportedException)
-        {
-            AddAfterCancellationCheck(
-                ScanDiagnosticKind.UnsupportedEntrySkipped,
-                path.Value,
-                diagnostics,
-                cancellationToken);
-        }
-    }
-
     private static void AddAfterCancellationCheck(
         ScanDiagnosticKind kind,
         string path,
@@ -492,10 +434,16 @@ public sealed class PhysicalFileScanner : IFileScanner
         CanonicalPath sourceRoot,
         List<FileEntry> files,
         List<ScanDiagnostic> diagnostics,
+        PhysicalEntryIdentity? rootPhysicalIdentity,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        FileScanResult result = new(sourceRoot, files, diagnostics, cancellationToken);
+        FileScanResult result = new(
+            sourceRoot,
+            files,
+            diagnostics,
+            rootPhysicalIdentity,
+            cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         return result;
     }
@@ -507,10 +455,14 @@ public sealed class PhysicalFileScanner : IFileScanner
         if (!OperatingSystem.IsWindows())
         {
             throw new PlatformNotSupportedException(
-                "Physical scanning is Windows-only in M3A because System.IO cannot "
-                + "portably distinguish regular POSIX files from sockets and FIFOs.");
+                "Physical scanning is Windows-only because a portable strong physical "
+                + "identity adapter is not available for this host.");
         }
 
         return pathPolicy;
     }
+
+    private readonly record struct PendingDirectory(
+        CanonicalPath Path,
+        PhysicalEntryIdentity? ExpectedIdentity);
 }

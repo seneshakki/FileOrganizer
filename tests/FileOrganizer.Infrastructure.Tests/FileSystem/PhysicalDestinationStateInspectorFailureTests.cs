@@ -1,4 +1,5 @@
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
 using FileOrganizer.Core.Planning;
 using FileOrganizer.Infrastructure.FileSystem;
 
@@ -9,16 +10,16 @@ public sealed class PhysicalDestinationStateInspectorFailureTests
     private readonly PathPolicy _paths = DestinationInspectorTestPreparation.HostPathPolicy();
 
     [Fact]
-    public void ClassifiesFilesAndDirectoriesWithoutAssumingEveryRequestIsAFileTarget()
+    public void ClassifiesFilesAndDirectoriesWithMatchingStrongIdentity()
     {
         OrganizationPlanPreparation preparation = Preparation();
         CanonicalPath directory = Assert.Single(preparation.DestinationDirectories);
         CanonicalPath target = Assert.Single(preparation.ProposedTargetPaths);
         FakeReadOnlyFileSystemProbe probe = new()
         {
-            GetAttributesHandler = path => path == directory.Value
-                ? FileAttributes.Directory
-                : FileAttributes.Normal,
+            ObserveHandler = path => path.Value == directory.Value
+                ? DirectoryObservation("1")
+                : FileObservation("2"),
         };
         PhysicalDestinationStateInspector inspector = new(probe);
 
@@ -27,21 +28,23 @@ public sealed class PhysicalDestinationStateInspectorFailureTests
             TestContext.Current.CancellationToken);
 
         Assert.Equal(2, snapshot.Facts.Count);
-        Assert.Equal(
-            DestinationEntryKind.Directory,
-            Fact(snapshot, directory).EntryKind);
-        Assert.Equal(DestinationEntryKind.File, Fact(snapshot, target).EntryKind);
+        DestinationPathFact directoryFact = Fact(snapshot, directory);
+        DestinationPathFact targetFact = Fact(snapshot, target);
+        Assert.Equal(DestinationEntryKind.Directory, directoryFact.EntryKind);
+        Assert.Equal(PhysicalEntryKind.Directory, directoryFact.PhysicalIdentity?.EntryKind);
+        Assert.Equal(DestinationEntryKind.File, targetFact.EntryKind);
+        Assert.Equal(PhysicalEntryKind.RegularFile, targetFact.PhysicalIdentity?.EntryKind);
         Assert.All(snapshot.Facts, fact => Assert.Null(fact.Failure));
-        Assert.Equal(4, probe.AttributeReadCount);
+        Assert.Equal(2, probe.ObservationCount);
     }
 
     [Fact]
-    public void MissingPathsAreExplicitFactsAndAreNotRecheckedAsExistingEntries()
+    public void MissingPathsAreExplicitFactsAndAreObservedOnce()
     {
         OrganizationPlanPreparation preparation = Preparation();
         FakeReadOnlyFileSystemProbe probe = new()
         {
-            GetAttributesHandler = _ => throw new FileNotFoundException(),
+            ObserveHandler = _ => PhysicalEntryObservation.Missing(),
         };
         PhysicalDestinationStateInspector inspector = new(probe);
 
@@ -53,18 +56,21 @@ public sealed class PhysicalDestinationStateInspectorFailureTests
             snapshot.Facts,
             fact => Assert.Equal(DestinationEntryKind.Missing, fact.EntryKind));
         Assert.All(snapshot.Facts, fact => Assert.Null(fact.Failure));
-        Assert.Equal(preparation.DestinationPaths.Count, probe.AttributeReadCount);
+        Assert.All(snapshot.Facts, fact => Assert.Null(fact.PhysicalIdentity));
+        Assert.Equal(preparation.DestinationPaths.Count, probe.ObservationCount);
     }
 
     [Theory]
-    [InlineData(FileAttributes.ReparsePoint)]
-    [InlineData(FileAttributes.Device)]
-    public void UnsupportedEntryTypesFailClosed(FileAttributes attributes)
+    [InlineData(PhysicalEntryObservationReason.ReparsePoint, PhysicalEntryKind.ReparsePoint)]
+    [InlineData(PhysicalEntryObservationReason.UnsupportedEntryKind, PhysicalEntryKind.Unsupported)]
+    public void UnsupportedEntryTypesFailClosed(
+        PhysicalEntryObservationReason reason,
+        PhysicalEntryKind kind)
     {
         OrganizationPlanPreparation preparation = Preparation();
         FakeReadOnlyFileSystemProbe probe = new()
         {
-            GetAttributesHandler = _ => attributes,
+            ObserveHandler = _ => PhysicalEntryObservation.Unsupported(reason, kind),
         };
         PhysicalDestinationStateInspector inspector = new(probe);
 
@@ -80,50 +86,18 @@ public sealed class PhysicalDestinationStateInspectorFailureTests
                 Assert.Equal(
                     DestinationInspectionFailureKind.UnsupportedEntry,
                     Assert.IsType<DestinationInspectionFailure>(fact.Failure).Kind);
+                Assert.Null(fact.PhysicalIdentity);
             });
     }
 
     [Fact]
-    public void DetectsAnObservableTypeChangeBetweenAttributeReads()
+    public void ExplicitEntryChangedObservationFailsClosed()
     {
         OrganizationPlanPreparation preparation = Preparation();
-        Dictionary<string, int> reads = new(StringComparer.Ordinal);
         FakeReadOnlyFileSystemProbe probe = new()
         {
-            GetAttributesHandler = path =>
-            {
-                reads.TryGetValue(path, out int count);
-                reads[path] = count + 1;
-                return count == 0 ? FileAttributes.Normal : FileAttributes.Directory;
-            },
-        };
-        PhysicalDestinationStateInspector inspector = new(probe);
-
-        DestinationStateSnapshot snapshot = inspector.Inspect(
-            preparation,
-            TestContext.Current.CancellationToken);
-
-        Assert.All(
-            snapshot.Facts,
-            fact =>
-            {
-                Assert.Equal(DestinationEntryKind.InspectionFailed, fact.EntryKind);
-                Assert.Equal(
-                    DestinationInspectionFailureKind.EntryChanged,
-                    Assert.IsType<DestinationInspectionFailure>(fact.Failure).Kind);
-            });
-    }
-
-    [Fact]
-    public void DisappearanceAfterTheFirstReadIsEntryChangedRatherThanMissing()
-    {
-        OrganizationPlanPreparation preparation = Preparation();
-        HashSet<string> observed = new(StringComparer.Ordinal);
-        FakeReadOnlyFileSystemProbe probe = new()
-        {
-            GetAttributesHandler = path => observed.Add(path)
-                ? FileAttributes.Normal
-                : throw new FileNotFoundException(),
+            ObserveHandler = _ => PhysicalEntryObservation.Inaccessible(
+                PhysicalEntryObservationReason.EntryChanged),
         };
         PhysicalDestinationStateInspector inspector = new(probe);
 
@@ -138,19 +112,70 @@ public sealed class PhysicalDestinationStateInspectorFailureTests
                 Assert.IsType<DestinationInspectionFailure>(fact.Failure).Kind));
     }
 
+    [Fact]
+    public void IdentityUnsupportedDirectoryRemainsAPreviewFactWithoutIdentity()
+    {
+        OrganizationPlanPreparation preparation = Preparation();
+        CanonicalPath directory = Assert.Single(preparation.DestinationDirectories);
+        FakeReadOnlyFileSystemProbe probe = new()
+        {
+            ObserveHandler = path => path.Value == directory.Value
+                ? PhysicalEntryObservation.Unsupported(
+                    PhysicalEntryObservationReason.UnsupportedCapability,
+                    PhysicalEntryKind.Directory)
+                : PhysicalEntryObservation.Missing(),
+        };
+        PhysicalDestinationStateInspector inspector = new(probe);
+
+        DestinationStateSnapshot snapshot = inspector.Inspect(
+            preparation,
+            TestContext.Current.CancellationToken);
+
+        DestinationPathFact fact = Fact(snapshot, directory);
+        Assert.Equal(DestinationEntryKind.Directory, fact.EntryKind);
+        Assert.Null(fact.Failure);
+        Assert.Null(fact.PhysicalIdentity);
+    }
+
     [Theory]
     [InlineData(typeof(UnauthorizedAccessException), DestinationInspectionFailureKind.AccessDenied)]
     [InlineData(typeof(ArgumentException), DestinationInspectionFailureKind.InvalidPath)]
     [InlineData(typeof(NotSupportedException), DestinationInspectionFailureKind.InvalidPath)]
     [InlineData(typeof(IOException), DestinationInspectionFailureKind.InputOutputFailure)]
-    public void MapsInspectionFailuresToExactStructuredKinds(
+    public void MapsInspectionExceptionsToExactStructuredKinds(
         Type exceptionType,
         DestinationInspectionFailureKind expectedKind)
     {
         OrganizationPlanPreparation preparation = Preparation();
         FakeReadOnlyFileSystemProbe probe = new()
         {
-            GetAttributesHandler = _ => throw CreateException(exceptionType),
+            ObserveHandler = _ => throw CreateException(exceptionType),
+        };
+        PhysicalDestinationStateInspector inspector = new(probe);
+
+        DestinationStateSnapshot snapshot = inspector.Inspect(
+            preparation,
+            TestContext.Current.CancellationToken);
+
+        Assert.All(
+            snapshot.Facts,
+            fact => Assert.Equal(
+                expectedKind,
+                Assert.IsType<DestinationInspectionFailure>(fact.Failure).Kind));
+    }
+
+    [Theory]
+    [InlineData(PhysicalEntryObservationReason.AccessDenied, DestinationInspectionFailureKind.AccessDenied)]
+    [InlineData(PhysicalEntryObservationReason.SharingViolation, DestinationInspectionFailureKind.InputOutputFailure)]
+    [InlineData(PhysicalEntryObservationReason.InputOutputFailure, DestinationInspectionFailureKind.InputOutputFailure)]
+    public void MapsInaccessibleObservationsToExactStructuredKinds(
+        PhysicalEntryObservationReason reason,
+        DestinationInspectionFailureKind expectedKind)
+    {
+        OrganizationPlanPreparation preparation = Preparation();
+        FakeReadOnlyFileSystemProbe probe = new()
+        {
+            ObserveHandler = _ => PhysicalEntryObservation.Inaccessible(reason),
         };
         PhysicalDestinationStateInspector inspector = new(probe);
 
@@ -180,7 +205,7 @@ public sealed class PhysicalDestinationStateInspectorFailureTests
             destination);
         FakeReadOnlyFileSystemProbe probe = new()
         {
-            GetAttributesHandler = _ => throw new InvalidOperationException(
+            ObserveHandler = _ => throw new InvalidOperationException(
                 "An incompatible path must not reach the physical probe."),
         };
         PhysicalDestinationStateInspector inspector = new(probe);
@@ -195,7 +220,7 @@ public sealed class PhysicalDestinationStateInspectorFailureTests
             fact => Assert.Equal(
                 DestinationInspectionFailureKind.InvalidPath,
                 Assert.IsType<DestinationInspectionFailure>(fact.Failure).Kind));
-        Assert.Equal(0, probe.AttributeReadCount);
+        Assert.Equal(0, probe.ObservationCount);
     }
 
     [Fact]
@@ -206,7 +231,7 @@ public sealed class PhysicalDestinationStateInspectorFailureTests
             TestContext.Current.CancellationToken);
         FakeReadOnlyFileSystemProbe probe = new()
         {
-            GetAttributesHandler = _ =>
+            ObserveHandler = _ =>
             {
                 cancellation.Cancel();
                 throw new IOException("simulated concurrent failure");
@@ -241,23 +266,44 @@ public sealed class PhysicalDestinationStateInspectorFailureTests
     private static Exception CreateException(Type exceptionType) =>
         (Exception)Activator.CreateInstance(exceptionType)!;
 
+    private static PhysicalEntryObservation DirectoryObservation(string identifier) =>
+        PhysicalEntryObservation.Success(
+            Identity(identifier, PhysicalEntryKind.Directory));
+
+    private static PhysicalEntryObservation FileObservation(string identifier) =>
+        PhysicalEntryObservation.Success(
+            Identity(identifier, PhysicalEntryKind.RegularFile),
+            new PhysicalFileMetadata(
+                10,
+                null,
+                new DateTimeOffset(2026, 4, 5, 6, 7, 8, TimeSpan.Zero)));
+
+    private static PhysicalEntryIdentity Identity(
+        string identifier,
+        PhysicalEntryKind kind) =>
+        new(
+            PhysicalEntryIdentity.WindowsFileIdScheme,
+            PhysicalEntryIdentity.WindowsFileIdSchemeVersion,
+            "0000000000000001",
+            identifier.PadLeft(32, '0'),
+            kind);
+
     private sealed class FakeReadOnlyFileSystemProbe : IReadOnlyFileSystemProbe
     {
-        public Func<string, FileAttributes> GetAttributesHandler { get; set; } =
-            _ => throw new InvalidOperationException("No attribute read was configured.");
+        public Func<CanonicalPath, PhysicalEntryObservation> ObserveHandler { get; set; } =
+            _ => throw new InvalidOperationException("No physical observation was configured.");
 
-        public int AttributeReadCount { get; private set; }
+        public int ObservationCount { get; private set; }
 
-        public FileAttributes GetAttributes(string path)
+        public PhysicalEntryObservation Observe(
+            CanonicalPath path,
+            CancellationToken cancellationToken = default)
         {
-            AttributeReadCount++;
-            return GetAttributesHandler(path);
+            ObservationCount++;
+            return ObserveHandler(path);
         }
 
         public IEnumerable<string> EnumerateEntries(string directoryPath) =>
             throw new InvalidOperationException("Destination inspection must not enumerate.");
-
-        public ReadOnlyFileSnapshot ReadFileSnapshot(string path) =>
-            throw new InvalidOperationException("Destination inspection must not read metadata.");
     }
 }

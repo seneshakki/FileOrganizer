@@ -152,6 +152,8 @@ public sealed class WindowsPhysicalIdentityAdapterTests
     [InlineData(5, PhysicalEntryObservationOutcome.Inaccessible, PhysicalEntryObservationReason.AccessDenied)]
     [InlineData(32, PhysicalEntryObservationOutcome.Inaccessible, PhysicalEntryObservationReason.SharingViolation)]
     [InlineData(50, PhysicalEntryObservationOutcome.Unsupported, PhysicalEntryObservationReason.UnsupportedCapability)]
+    [InlineData(123, PhysicalEntryObservationOutcome.Unsupported, PhysicalEntryObservationReason.InvalidPath)]
+    [InlineData(303, PhysicalEntryObservationOutcome.Inaccessible, PhysicalEntryObservationReason.EntryChanged)]
     public void NativeOpenFailuresRemainStructured(
         int errorCode,
         PhysicalEntryObservationOutcome expectedOutcome,
@@ -163,6 +165,25 @@ public sealed class WindowsPhysicalIdentityAdapterTests
         Assert.Equal(expectedOutcome, observation.Outcome);
         Assert.Equal(expectedReason, observation.Reason);
         Assert.Equal(errorCode, observation.NativeErrorCode);
+        Assert.Null(observation.Identity);
+    }
+
+    [Theory]
+    [InlineData(0, PhysicalEntryObservationOutcome.Unsupported, PhysicalEntryObservationReason.UnsupportedEntryKind)]
+    [InlineData(5, PhysicalEntryObservationOutcome.Inaccessible, PhysicalEntryObservationReason.AccessDenied)]
+    public void UnknownFileTypeDistinguishesAValidUnknownTypeFromANativeFailure(
+        int nativeErrorCode,
+        PhysicalEntryObservationOutcome expectedOutcome,
+        PhysicalEntryObservationReason expectedReason)
+    {
+        PhysicalEntryObservation observation = Assert.IsType<PhysicalEntryObservation>(
+            WindowsPhysicalIdentityAdapter.ClassifyFileType(
+                WindowsFileIdentityNative.FileTypeUnknown,
+                nativeErrorCode));
+
+        Assert.Equal(expectedOutcome, observation.Outcome);
+        Assert.Equal(expectedReason, observation.Reason);
+        Assert.Equal(nativeErrorCode == 0 ? null : nativeErrorCode, observation.NativeErrorCode);
         Assert.Null(observation.Identity);
     }
 

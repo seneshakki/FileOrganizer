@@ -1,26 +1,17 @@
 using System.Security;
 using FileOrganizer.Core.Abstractions;
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
 using FileOrganizer.Core.Planning;
 
 namespace FileOrganizer.Infrastructure.FileSystem;
 
 /// <summary>
-/// Captures read-only existence/type facts for the exact destination paths a
-/// prepared plan requests.
+/// Captures read-only existence, type, and physical-identity facts for the
+/// exact destination paths requested by a prepared plan.
 /// </summary>
-/// <remarks>
-/// The public physical adapter is deliberately Windows-only in M3A for the
-/// same entry-type safety reason as <see cref="PhysicalFileScanner"/>. It reads
-/// attributes twice for supported entries, detecting an observable type/removal
-/// race, but this is not a durable identity guarantee. M3B must revalidate
-/// immediately before execution.
-/// </remarks>
 public sealed class PhysicalDestinationStateInspector : IDestinationStateInspector
 {
-    private const FileAttributes UnsupportedAttributes =
-        FileAttributes.ReparsePoint | FileAttributes.Device;
-
     private readonly IReadOnlyFileSystemProbe _probe;
 
     /// <summary>Creates the Windows physical destination inspector.</summary>
@@ -79,67 +70,19 @@ public sealed class PhysicalDestinationStateInspector : IDestinationStateInspect
         CanonicalPath path,
         CancellationToken cancellationToken)
     {
-        AttributeObservation first = ReadAttributes(
-            path,
-            missingMeansChanged: false,
-            cancellationToken);
-
-        if (first.Fact is not null)
-        {
-            return first.Fact;
-        }
-
-        DestinationEntryKind firstKind = Classify(first.Attributes);
-        if (firstKind == DestinationEntryKind.InspectionFailed)
-        {
-            return Unsupported(path);
-        }
-
-        AttributeObservation second = ReadAttributes(
-            path,
-            missingMeansChanged: true,
-            cancellationToken);
-
-        if (second.Fact is not null)
-        {
-            return second.Fact;
-        }
-
-        DestinationEntryKind secondKind = Classify(second.Attributes);
-        if (secondKind == DestinationEntryKind.InspectionFailed)
-        {
-            return Unsupported(path);
-        }
-
-        if (firstKind != secondKind)
-        {
-            return Failed(
-                path,
-                DestinationInspectionFailureKind.EntryChanged,
-                "The destination entry changed type while it was being inspected.");
-        }
-
-        return new DestinationPathFact(path, secondKind);
-    }
-
-    private AttributeObservation ReadAttributes(
-        CanonicalPath path,
-        bool missingMeansChanged,
-        CancellationToken cancellationToken)
-    {
+        PhysicalEntryObservation observation;
         try
         {
-            FileAttributes attributes = _probe.GetAttributes(path.Value);
+            observation = _probe.Observe(path, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
-            return new AttributeObservation(attributes, null);
         }
         catch (FileNotFoundException)
         {
-            return MissingOrChanged(path, missingMeansChanged, cancellationToken);
+            return MissingAfterCancellationCheck(path, cancellationToken);
         }
         catch (DirectoryNotFoundException)
         {
-            return MissingOrChanged(path, missingMeansChanged, cancellationToken);
+            return MissingAfterCancellationCheck(path, cancellationToken);
         }
         catch (UnauthorizedAccessException)
         {
@@ -159,27 +102,15 @@ public sealed class PhysicalDestinationStateInspector : IDestinationStateInspect
         }
         catch (PathTooLongException)
         {
-            return FailureAfterCancellationCheck(
-                path,
-                DestinationInspectionFailureKind.InvalidPath,
-                "The platform rejected the destination path.",
-                cancellationToken);
+            return InvalidPathAfterCancellationCheck(path, cancellationToken);
         }
         catch (ArgumentException)
         {
-            return FailureAfterCancellationCheck(
-                path,
-                DestinationInspectionFailureKind.InvalidPath,
-                "The platform rejected the destination path.",
-                cancellationToken);
+            return InvalidPathAfterCancellationCheck(path, cancellationToken);
         }
         catch (NotSupportedException)
         {
-            return FailureAfterCancellationCheck(
-                path,
-                DestinationInspectionFailureKind.InvalidPath,
-                "The platform rejected the destination path.",
-                cancellationToken);
+            return InvalidPathAfterCancellationCheck(path, cancellationToken);
         }
         catch (IOException)
         {
@@ -189,41 +120,102 @@ public sealed class PhysicalDestinationStateInspector : IDestinationStateInspect
                 "An input/output failure prevented destination inspection.",
                 cancellationToken);
         }
+
+        return FromObservation(path, observation);
     }
 
-    private static AttributeObservation MissingOrChanged(
+    private static DestinationPathFact FromObservation(
         CanonicalPath path,
-        bool missingMeansChanged,
+        PhysicalEntryObservation observation)
+    {
+        if (observation.Outcome == PhysicalEntryObservationOutcome.Success
+            || (observation.Outcome == PhysicalEntryObservationOutcome.Unsupported
+                && observation.Reason == PhysicalEntryObservationReason.UnsupportedCapability))
+        {
+            return observation.EntryKind switch
+            {
+                PhysicalEntryKind.RegularFile => new DestinationPathFact(
+                    path,
+                    DestinationEntryKind.File,
+                    physicalIdentity: observation.Identity),
+                PhysicalEntryKind.Directory => new DestinationPathFact(
+                    path,
+                    DestinationEntryKind.Directory,
+                    physicalIdentity: observation.Identity),
+                _ => Unsupported(path),
+            };
+        }
+
+        if (observation.Outcome == PhysicalEntryObservationOutcome.Missing)
+        {
+            return new DestinationPathFact(path, DestinationEntryKind.Missing);
+        }
+
+        if (observation.Outcome == PhysicalEntryObservationOutcome.Inaccessible)
+        {
+            return observation.Reason switch
+            {
+                PhysicalEntryObservationReason.AccessDenied => Failed(
+                    path,
+                    DestinationInspectionFailureKind.AccessDenied,
+                    "Access to the destination path was denied."),
+                PhysicalEntryObservationReason.EntryChanged => Changed(path),
+                _ => Failed(
+                    path,
+                    DestinationInspectionFailureKind.InputOutputFailure,
+                    "A read-only handle query could not establish destination state."),
+            };
+        }
+
+        return observation.Reason switch
+        {
+            PhysicalEntryObservationReason.ReparsePoint
+                or PhysicalEntryObservationReason.UnsupportedEntryKind
+                or PhysicalEntryObservationReason.UnsupportedCapability => Unsupported(path),
+            PhysicalEntryObservationReason.DeletePending => Changed(path),
+            PhysicalEntryObservationReason.InvalidPath => Failed(
+                path,
+                DestinationInspectionFailureKind.InvalidPath,
+                "The platform rejected the destination path."),
+            _ => Failed(
+                path,
+                DestinationInspectionFailureKind.InputOutputFailure,
+                "Required destination metadata was unavailable."),
+        };
+    }
+
+    private static DestinationPathFact MissingAfterCancellationCheck(
+        CanonicalPath path,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-
-        DestinationPathFact fact = missingMeansChanged
-            ? Failed(
-                path,
-                DestinationInspectionFailureKind.EntryChanged,
-                "The destination entry disappeared while it was being inspected.")
-            : new DestinationPathFact(path, DestinationEntryKind.Missing);
-
-        return new AttributeObservation(default, fact);
+        return new DestinationPathFact(path, DestinationEntryKind.Missing);
     }
 
-    private static AttributeObservation FailureAfterCancellationCheck(
+    private static DestinationPathFact InvalidPathAfterCancellationCheck(
+        CanonicalPath path,
+        CancellationToken cancellationToken) =>
+        FailureAfterCancellationCheck(
+            path,
+            DestinationInspectionFailureKind.InvalidPath,
+            "The platform rejected the destination path.",
+            cancellationToken);
+
+    private static DestinationPathFact FailureAfterCancellationCheck(
         CanonicalPath path,
         DestinationInspectionFailureKind kind,
         string description,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return new AttributeObservation(default, Failed(path, kind, description));
+        return Failed(path, kind, description);
     }
 
-    private static DestinationEntryKind Classify(FileAttributes attributes) =>
-        (attributes & UnsupportedAttributes) != 0
-            ? DestinationEntryKind.InspectionFailed
-            : (attributes & FileAttributes.Directory) != 0
-                ? DestinationEntryKind.Directory
-                : DestinationEntryKind.File;
+    private static DestinationPathFact Changed(CanonicalPath path) =>
+        Failed(
+            path,
+            DestinationInspectionFailureKind.EntryChanged,
+            "The destination entry changed while it was being inspected.");
 
     private static DestinationPathFact Unsupported(CanonicalPath path) =>
         Failed(
@@ -245,15 +237,10 @@ public sealed class PhysicalDestinationStateInspector : IDestinationStateInspect
         if (!OperatingSystem.IsWindows())
         {
             throw new PlatformNotSupportedException(
-                "Physical destination inspection is Windows-only in M3A because "
-                + "System.IO cannot portably distinguish regular POSIX files from "
-                + "sockets and FIFOs.");
+                "Physical destination inspection is Windows-only because a portable "
+                + "strong physical identity adapter is not available for this host.");
         }
 
         return new SystemReadOnlyFileSystemProbe();
     }
-
-    private readonly record struct AttributeObservation(
-        FileAttributes Attributes,
-        DestinationPathFact? Fact);
 }

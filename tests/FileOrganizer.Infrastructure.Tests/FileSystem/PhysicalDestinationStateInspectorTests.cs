@@ -1,4 +1,5 @@
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
 using FileOrganizer.Core.Planning;
 using FileOrganizer.Infrastructure.FileSystem;
 
@@ -34,10 +35,14 @@ public sealed class PhysicalDestinationStateInspectorTests
 
         CanonicalPath destinationPath = Assert.Single(preparation.DestinationDirectories);
         CanonicalPath targetPath = Assert.Single(preparation.ProposedTargetPaths);
+        DestinationPathFact destinationFact = Fact(snapshot, destinationPath);
+        DestinationPathFact targetFact = Fact(snapshot, targetPath);
+        Assert.Equal(DestinationEntryKind.Directory, destinationFact.EntryKind);
         Assert.Equal(
-            DestinationEntryKind.Directory,
-            Fact(snapshot, destinationPath).EntryKind);
-        Assert.Equal(DestinationEntryKind.Missing, Fact(snapshot, targetPath).EntryKind);
+            PhysicalEntryKind.Directory,
+            Assert.IsType<PhysicalEntryIdentity>(destinationFact.PhysicalIdentity).EntryKind);
+        Assert.Equal(DestinationEntryKind.Missing, targetFact.EntryKind);
+        Assert.Null(targetFact.PhysicalIdentity);
         Assert.Equal("source", File.ReadAllText(source));
         Assert.True(Directory.Exists(destination));
         Assert.False(File.Exists(targetPath.Value));
@@ -62,7 +67,11 @@ public sealed class PhysicalDestinationStateInspectorTests
             TestContext.Current.CancellationToken);
 
         CanonicalPath targetPath = Assert.Single(preparation.ProposedTargetPaths);
-        Assert.Equal(DestinationEntryKind.File, Fact(snapshot, targetPath).EntryKind);
+        DestinationPathFact targetFact = Fact(snapshot, targetPath);
+        Assert.Equal(DestinationEntryKind.File, targetFact.EntryKind);
+        Assert.Equal(
+            PhysicalEntryKind.RegularFile,
+            Assert.IsType<PhysicalEntryIdentity>(targetFact.PhysicalIdentity).EntryKind);
         Assert.Equal("existing", File.ReadAllText(existing));
     }
 

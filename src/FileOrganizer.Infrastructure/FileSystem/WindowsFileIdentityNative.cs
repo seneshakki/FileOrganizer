@@ -14,6 +14,7 @@ internal static class WindowsFileIdentityNative
     internal const uint FileFlagBackupSemantics = 0x02000000;
     internal const uint FileFlagOpenReparsePoint = 0x00200000;
 
+    internal const uint FileTypeUnknown = 0x00000000;
     internal const uint FileTypeDisk = 0x00000001;
 
     internal const uint FileAttributeDirectory = 0x00000010;

@@ -1,4 +1,5 @@
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
 using FileOrganizer.Core.Scanning;
 using FileOrganizer.Infrastructure.FileSystem;
 
@@ -17,7 +18,7 @@ public sealed class PhysicalFileScannerFailureTests
         CanonicalPath root = Root();
         FakeReadOnlyFileSystemProbe probe = new()
         {
-            GetAttributesHandler = _ => throw new UnauthorizedAccessException(),
+            ObserveHandler = _ => throw new UnauthorizedAccessException(),
         };
         PhysicalFileScanner scanner = new(_paths, probe);
 
@@ -29,6 +30,7 @@ public sealed class PhysicalFileScannerFailureTests
         Assert.False(result.IsComplete);
         Assert.Empty(result.Files);
         Assert.Equal(ScanDiagnosticKind.AccessDenied, Assert.Single(result.Diagnostics).Kind);
+        Assert.Null(result.RootPhysicalIdentity);
     }
 
     [Fact]
@@ -53,15 +55,15 @@ public sealed class PhysicalFileScannerFailureTests
     }
 
     [Fact]
-    public void ReportsAnEntryThatDisappearsBeforeAttributeInspection()
+    public void ReportsAnEntryThatDisappearsBeforeHandleObservation()
     {
         CanonicalPath root = Root();
         string vanished = Child(root, "vanished.txt");
         FakeReadOnlyFileSystemProbe probe = new()
         {
-            GetAttributesHandler = path => path == root.Value
-                ? FileAttributes.Directory
-                : throw new FileNotFoundException(),
+            ObserveHandler = path => path.Value == root.Value
+                ? DirectoryObservation("1")
+                : PhysicalEntryObservation.Missing(),
             EnumerateEntriesHandler = _ => [vanished],
         };
         PhysicalFileScanner scanner = new(_paths, probe);
@@ -84,7 +86,10 @@ public sealed class PhysicalFileScannerFailureTests
         CanonicalPath root = Root();
         string file = Child(root, "unreadable.txt");
         FakeReadOnlyFileSystemProbe probe = RegularFileProbe(root, file);
-        probe.ReadFileSnapshotHandler = _ => throw new IOException("simulated failure");
+        probe.ObserveHandler = path => path.Value == root.Value
+            ? DirectoryObservation("1")
+            : PhysicalEntryObservation.Inaccessible(
+                PhysicalEntryObservationReason.InputOutputFailure);
         PhysicalFileScanner scanner = new(_paths, probe);
 
         FileScanResult result = scanner.Scan(
@@ -106,9 +111,11 @@ public sealed class PhysicalFileScannerFailureTests
         string link = Child(root, "link");
         FakeReadOnlyFileSystemProbe probe = new()
         {
-            GetAttributesHandler = path => path == root.Value
-                ? FileAttributes.Directory
-                : FileAttributes.Directory | FileAttributes.ReparsePoint,
+            ObserveHandler = path => path.Value == root.Value
+                ? DirectoryObservation("1")
+                : PhysicalEntryObservation.Unsupported(
+                    PhysicalEntryObservationReason.ReparsePoint,
+                    PhysicalEntryKind.ReparsePoint),
             EnumerateEntriesHandler = path => path == root.Value
                 ? [link]
                 : throw new InvalidOperationException("The link must not be followed."),
@@ -128,13 +135,16 @@ public sealed class PhysicalFileScannerFailureTests
     }
 
     [Fact]
-    public void RejectsAnEntryThatBecomesAReparsePointBesideMetadataCapture()
+    public void RejectsAnEntryObservedAsAReparsePointBesideMetadataCapture()
     {
         CanonicalPath root = Root();
         string changed = Child(root, "changed.txt");
         FakeReadOnlyFileSystemProbe probe = RegularFileProbe(root, changed);
-        probe.ReadFileSnapshotHandler = _ =>
-            new ReadOnlyFileSnapshot(FileAttributes.ReparsePoint, null);
+        probe.ObserveHandler = path => path.Value == root.Value
+            ? DirectoryObservation("1")
+            : PhysicalEntryObservation.Unsupported(
+                PhysicalEntryObservationReason.ReparsePoint,
+                PhysicalEntryKind.ReparsePoint);
         PhysicalFileScanner scanner = new(_paths, probe);
 
         FileScanResult result = scanner.Scan(
@@ -156,9 +166,11 @@ public sealed class PhysicalFileScannerFailureTests
         string unsupported = Child(root, "device-directory");
         FakeReadOnlyFileSystemProbe probe = new()
         {
-            GetAttributesHandler = path => path == root.Value
-                ? FileAttributes.Directory
-                : FileAttributes.Directory | FileAttributes.Device,
+            ObserveHandler = path => path.Value == root.Value
+                ? DirectoryObservation("1")
+                : PhysicalEntryObservation.Unsupported(
+                    PhysicalEntryObservationReason.UnsupportedEntryKind,
+                    PhysicalEntryKind.Unsupported),
             EnumerateEntriesHandler = _ => [unsupported],
         };
         PhysicalFileScanner scanner = new(_paths, probe);
@@ -176,13 +188,16 @@ public sealed class PhysicalFileScannerFailureTests
     }
 
     [Fact]
-    public void ReportsAFileThatBecomesADirectoryAsChanged()
+    public void ReportsAnEntryKnownToHaveChangedType()
     {
         CanonicalPath root = Root();
         string changed = Child(root, "changed.txt");
         FakeReadOnlyFileSystemProbe probe = RegularFileProbe(root, changed);
-        probe.ReadFileSnapshotHandler = _ =>
-            new ReadOnlyFileSnapshot(FileAttributes.Directory, null);
+        probe.ObserveHandler = path => path.Value == root.Value
+            ? DirectoryObservation("1")
+            : PhysicalEntryObservation.Inaccessible(
+                PhysicalEntryObservationReason.EntryChanged,
+                entryKind: PhysicalEntryKind.Directory);
         PhysicalFileScanner scanner = new(_paths, probe);
 
         FileScanResult result = scanner.Scan(
@@ -198,24 +213,51 @@ public sealed class PhysicalFileScannerFailureTests
     }
 
     [Fact]
+    public void ReportsARootRaceAsEntryChangedRatherThanAStaticWrongKind()
+    {
+        CanonicalPath root = Root();
+        FakeReadOnlyFileSystemProbe probe = new()
+        {
+            ObserveHandler = _ => PhysicalEntryObservation.Inaccessible(
+                PhysicalEntryObservationReason.EntryChanged,
+                entryKind: PhysicalEntryKind.RegularFile),
+        };
+        PhysicalFileScanner scanner = new(_paths, probe);
+
+        FileScanResult result = scanner.Scan(
+            root,
+            recursive: false,
+            TestContext.Current.CancellationToken);
+
+        Assert.False(result.IsComplete);
+        Assert.Empty(result.Files);
+        Assert.Equal(
+            ScanDiagnosticKind.EntryChanged,
+            Assert.Single(result.Diagnostics).Kind);
+        Assert.Null(result.RootPhysicalIdentity);
+    }
+
+    [Fact]
     public void RechecksAQueuedDirectoryAndDoesNotFollowItIfItBecomesAReparsePoint()
     {
         CanonicalPath root = Root();
         string childDirectory = Child(root, "changing-directory");
-        int childAttributeReads = 0;
+        int childObservations = 0;
         FakeReadOnlyFileSystemProbe probe = new()
         {
-            GetAttributesHandler = path =>
+            ObserveHandler = path =>
             {
-                if (path == root.Value)
+                if (path.Value == root.Value)
                 {
-                    return FileAttributes.Directory;
+                    return DirectoryObservation("1");
                 }
 
-                childAttributeReads++;
-                return childAttributeReads == 1
-                    ? FileAttributes.Directory
-                    : FileAttributes.Directory | FileAttributes.ReparsePoint;
+                childObservations++;
+                return childObservations == 1
+                    ? DirectoryObservation("2")
+                    : PhysicalEntryObservation.Unsupported(
+                        PhysicalEntryObservationReason.ReparsePoint,
+                        PhysicalEntryKind.ReparsePoint);
             },
             EnumerateEntriesHandler = path => path == root.Value
                 ? [childDirectory]
@@ -231,10 +273,43 @@ public sealed class PhysicalFileScannerFailureTests
 
         Assert.False(result.IsComplete);
         Assert.Empty(result.Files);
-        Assert.Equal(2, childAttributeReads);
+        Assert.Equal(2, childObservations);
         Assert.Equal(
             ScanDiagnosticKind.ReparsePointSkipped,
             Assert.Single(result.Diagnostics).Kind);
+    }
+
+    [Fact]
+    public void IdentityUnsupportedFileMetadataRemainsAvailableForPreview()
+    {
+        CanonicalPath root = Root();
+        string file = Child(root, "preview.txt");
+        PhysicalFileMetadata metadata = Metadata();
+        FakeReadOnlyFileSystemProbe probe = new()
+        {
+            ObserveHandler = path => path.Value == root.Value
+                ? PhysicalEntryObservation.Unsupported(
+                    PhysicalEntryObservationReason.UnsupportedCapability,
+                    PhysicalEntryKind.Directory)
+                : PhysicalEntryObservation.Unsupported(
+                    PhysicalEntryObservationReason.UnsupportedCapability,
+                    PhysicalEntryKind.RegularFile,
+                    metadata),
+            EnumerateEntriesHandler = _ => [file],
+        };
+        PhysicalFileScanner scanner = new(_paths, probe);
+
+        FileScanResult result = scanner.Scan(
+            root,
+            recursive: false,
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.IsComplete);
+        Assert.Null(result.RootPhysicalIdentity);
+        var entry = Assert.Single(result.Files);
+        Assert.Null(entry.PhysicalIdentity);
+        Assert.Equal(metadata.Length, entry.SizeInBytes);
+        Assert.Equal(metadata.ModifiedUtc, entry.ModifiedUtc);
     }
 
     [Fact]
@@ -245,7 +320,7 @@ public sealed class PhysicalFileScannerFailureTests
         string outside = Child(parent, "outside.txt");
         FakeReadOnlyFileSystemProbe probe = new()
         {
-            GetAttributesHandler = _ => FileAttributes.Directory,
+            ObserveHandler = _ => DirectoryObservation("1"),
             EnumerateEntriesHandler = _ => [outside],
         };
         PhysicalFileScanner scanner = new(_paths, probe);
@@ -268,7 +343,7 @@ public sealed class PhysicalFileScannerFailureTests
         CanonicalPath root = Root();
         FakeReadOnlyFileSystemProbe probe = new()
         {
-            GetAttributesHandler = _ => FileAttributes.Directory,
+            ObserveHandler = _ => DirectoryObservation("1"),
             EnumerateEntriesHandler = _ => ["relative.txt"],
         };
         PhysicalFileScanner scanner = new(_paths, probe);
@@ -283,7 +358,7 @@ public sealed class PhysicalFileScannerFailureTests
         Assert.Equal(
             ScanDiagnosticKind.InvalidEntryPath,
             Assert.Single(result.Diagnostics).Kind);
-        Assert.Equal(2, probe.AttributeReadCount);
+        Assert.Equal(2, probe.ObservationCount);
     }
 
     [Fact]
@@ -295,7 +370,7 @@ public sealed class PhysicalFileScannerFailureTests
             TestContext.Current.CancellationToken);
         FakeReadOnlyFileSystemProbe probe = new()
         {
-            GetAttributesHandler = _ => FileAttributes.Directory,
+            ObserveHandler = _ => DirectoryObservation("1"),
             EnumerateEntriesHandler = _ => CancelThenYield(cancellation, file),
         };
         PhysicalFileScanner scanner = new(_paths, probe);
@@ -304,8 +379,7 @@ public sealed class PhysicalFileScannerFailureTests
             () => scanner.Scan(root, recursive: true, cancellation.Token));
 
         Assert.Equal(cancellation.Token, exception.CancellationToken);
-        Assert.Equal(2, probe.AttributeReadCount);
-        Assert.Equal(0, probe.MetadataReadCount);
+        Assert.Equal(2, probe.ObservationCount);
     }
 
     [Fact]
@@ -316,7 +390,7 @@ public sealed class PhysicalFileScannerFailureTests
             TestContext.Current.CancellationToken);
         FakeReadOnlyFileSystemProbe probe = new()
         {
-            GetAttributesHandler = _ =>
+            ObserveHandler = _ =>
             {
                 cancellation.Cancel();
                 throw new IOException("simulated failure after cancellation");
@@ -335,15 +409,32 @@ public sealed class PhysicalFileScannerFailureTests
         string file) =>
         new()
         {
-            GetAttributesHandler = path => path == root.Value
-                ? FileAttributes.Directory
-                : FileAttributes.Normal,
+            ObserveHandler = path => path.Value == root.Value
+                ? DirectoryObservation("1")
+                : FileObservation("2"),
             EnumerateEntriesHandler = _ => [file],
-            ReadFileSnapshotHandler = _ =>
-                new ReadOnlyFileSnapshot(
-                    FileAttributes.Normal,
-                    new ReadOnlyFileMetadata(10, null, Modified)),
         };
+
+    private static PhysicalEntryObservation DirectoryObservation(string identifier) =>
+        PhysicalEntryObservation.Success(
+            Identity(identifier, PhysicalEntryKind.Directory));
+
+    private static PhysicalEntryObservation FileObservation(string identifier) =>
+        PhysicalEntryObservation.Success(
+            Identity(identifier, PhysicalEntryKind.RegularFile),
+            Metadata());
+
+    private static PhysicalEntryIdentity Identity(
+        string identifier,
+        PhysicalEntryKind kind) =>
+        new(
+            PhysicalEntryIdentity.WindowsFileIdScheme,
+            PhysicalEntryIdentity.WindowsFileIdSchemeVersion,
+            "0000000000000001",
+            identifier.PadLeft(32, '0'),
+            kind);
+
+    private static PhysicalFileMetadata Metadata() => new(10, null, Modified);
 
     private CanonicalPath Root()
     {
@@ -381,32 +472,23 @@ public sealed class PhysicalFileScannerFailureTests
 
     private sealed class FakeReadOnlyFileSystemProbe : IReadOnlyFileSystemProbe
     {
-        public Func<string, FileAttributes> GetAttributesHandler { get; set; } =
-            _ => throw new InvalidOperationException("No attribute read was configured.");
+        public Func<CanonicalPath, PhysicalEntryObservation> ObserveHandler { get; set; } =
+            _ => throw new InvalidOperationException("No physical observation was configured.");
 
         public Func<string, IEnumerable<string>> EnumerateEntriesHandler { get; set; } =
             _ => throw new InvalidOperationException("No enumeration was configured.");
 
-        public Func<string, ReadOnlyFileSnapshot> ReadFileSnapshotHandler { get; set; } =
-            _ => throw new InvalidOperationException("No metadata read was configured.");
+        public int ObservationCount { get; private set; }
 
-        public int AttributeReadCount { get; private set; }
-
-        public int MetadataReadCount { get; private set; }
-
-        public FileAttributes GetAttributes(string path)
+        public PhysicalEntryObservation Observe(
+            CanonicalPath path,
+            CancellationToken cancellationToken = default)
         {
-            AttributeReadCount++;
-            return GetAttributesHandler(path);
+            ObservationCount++;
+            return ObserveHandler(path);
         }
 
         public IEnumerable<string> EnumerateEntries(string directoryPath) =>
             EnumerateEntriesHandler(directoryPath);
-
-        public ReadOnlyFileSnapshot ReadFileSnapshot(string path)
-        {
-            MetadataReadCount++;
-            return ReadFileSnapshotHandler(path);
-        }
     }
 }

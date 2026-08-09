@@ -1,4 +1,5 @@
 using FileOrganizer.Core.Paths;
+using FileOrganizer.Core.Physical;
 using FileOrganizer.Core.Scanning;
 using FileOrganizer.Infrastructure.FileSystem;
 
@@ -32,8 +33,16 @@ public sealed class PhysicalFileScannerTests
 
         Assert.True(result.IsComplete);
         Assert.Equal(Canonical(temp.FullPath).Value, result.CanonicalRoot.Value);
+        Assert.Equal(
+            PhysicalEntryKind.Directory,
+            Assert.IsType<PhysicalEntryIdentity>(result.RootPhysicalIdentity).EntryKind);
         Assert.Equal(["a.txt", "b.pdf"], result.Files.Select(file => file.Name));
         Assert.Equal([3, 5], result.Files.Select(file => file.SizeInBytes));
+        Assert.All(
+            result.Files,
+            file => Assert.Equal(
+                PhysicalEntryKind.RegularFile,
+                Assert.IsType<PhysicalEntryIdentity>(file.PhysicalIdentity).EntryKind));
         Assert.True(File.Exists(first));
         Assert.True(File.Exists(second));
     }
@@ -56,8 +65,10 @@ public sealed class PhysicalFileScannerTests
             TestContext.Current.CancellationToken);
 
         Assert.True(shallow.IsComplete);
+        Assert.NotNull(shallow.RootPhysicalIdentity);
         Assert.Equal(["top.txt"], shallow.Files.Select(file => file.Name));
         Assert.True(recursive.IsComplete);
+        Assert.Equal(shallow.RootPhysicalIdentity, recursive.RootPhysicalIdentity);
         Assert.Equal(["deep.txt", "top.txt"], recursive.Files.Select(file => file.Name));
     }
 
