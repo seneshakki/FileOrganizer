@@ -181,10 +181,12 @@ public sealed class ExecutionResult
         }
 
         if (outcome == ExecutionOutcome.NoWork
-            && (manifest.Items.Count != 0 || items.Length != 0))
+            && (manifest.Items.Count != 0
+                || items.Length != 0
+                || problems.Length != 0))
         {
             throw new ArgumentException(
-                "NoWork is valid only for an empty manifest.",
+                "NoWork is valid only for an empty manifest with no execution problems.",
                 nameof(outcome));
         }
 
@@ -217,7 +219,7 @@ public sealed class ExecutionResult
                 nameof(outcome));
         }
 
-        ValidateFailStopShape(outcome, items, anythingApplied);
+        ValidateFailStopShape(outcome, items, anythingApplied, problems);
 
         if (outcome == ExecutionOutcome.RecoveryRequired
             && !anythingAmbiguous
@@ -268,7 +270,8 @@ public sealed class ExecutionResult
     private static void ValidateFailStopShape(
         ExecutionOutcome outcome,
         ExecutionItemResult[] items,
-        bool anythingApplied)
+        bool anythingApplied,
+        ExecutionProblem[] problems)
     {
         static bool IsDefiniteStop(ExecutionItemOutcome itemOutcome) =>
             itemOutcome is ExecutionItemOutcome.NotApplied
@@ -279,15 +282,24 @@ public sealed class ExecutionResult
         {
             case ExecutionOutcome.Stopped:
                 bool allNotAttempted = items.All(
-                    item => item.Outcome == ExecutionItemOutcome.NotAttempted);
-                bool oneDefiniteStop = items.Length != 0
-                    && IsDefiniteStop(items[0].Outcome)
+                        item => item.Outcome == ExecutionItemOutcome.NotAttempted)
+                    && problems.Any(problem => problem.OperationOrdinal is null);
+                bool preflightStops = items.Any(
+                        item => item.Outcome is ExecutionItemOutcome.Blocked
+                            or ExecutionItemOutcome.Conflict)
+                    && items.All(
+                        item => item.Outcome is ExecutionItemOutcome.NotAttempted
+                            or ExecutionItemOutcome.Blocked
+                            or ExecutionItemOutcome.Conflict);
+                bool moveDidNotApply = items.Length != 0
+                    && items[0].Outcome == ExecutionItemOutcome.NotApplied
                     && items.Skip(1).All(
                         item => item.Outcome == ExecutionItemOutcome.NotAttempted);
-                if (anythingApplied || (!allNotAttempted && !oneDefiniteStop))
+                if (anythingApplied
+                    || (!allNotAttempted && !preflightStops && !moveDidNotApply))
                 {
                     throw new ArgumentException(
-                        "Stopped permits no applied operation and at most one definite item failure.",
+                        "Stopped permits no applied operation and only preflight failures, one first-operation failure, or a run-level stop.",
                         nameof(outcome));
                 }
 
@@ -297,13 +309,19 @@ public sealed class ExecutionResult
                 int partialStop = Array.FindIndex(
                     items,
                     item => item.Outcome != ExecutionItemOutcome.Applied);
-                if (partialStop <= 0
-                    || !IsDefiniteStop(items[partialStop].Outcome)
-                    || items.Skip(partialStop + 1).Any(
-                        item => item.Outcome != ExecutionItemOutcome.NotAttempted))
+                bool definiteItemStop = partialStop > 0
+                    && IsDefiniteStop(items[partialStop].Outcome)
+                    && items.Skip(partialStop + 1).All(
+                        item => item.Outcome == ExecutionItemOutcome.NotAttempted);
+                bool runLevelJournalStop = partialStop > 0
+                    && items.Skip(partialStop).All(
+                        item => item.Outcome == ExecutionItemOutcome.NotAttempted)
+                    && problems.Any(
+                        problem => problem.Kind == ExecutionProblemKind.JournalFailure);
+                if (!definiteItemStop && !runLevelJournalStop)
                 {
                     throw new ArgumentException(
-                        "PartiallyCompleted requires an applied prefix, one definite failure, and a not-attempted suffix.",
+                        "PartiallyCompleted requires an applied prefix followed by one definite item failure or a run-level journal failure.",
                         nameof(outcome));
                 }
 
@@ -313,40 +331,39 @@ public sealed class ExecutionResult
                 int interruption = Array.FindIndex(
                     items,
                     item => item.Outcome != ExecutionItemOutcome.Applied);
-                if (interruption < 0
+                if (!problems.Any(
+                        problem => problem.Kind == ExecutionProblemKind.CancellationRequested)
+                    || interruption < 0
                     || items[interruption].Outcome is not (
                         ExecutionItemOutcome.NotApplied or ExecutionItemOutcome.NotAttempted)
                     || items.Skip(interruption + 1).Any(
                         item => item.Outcome != ExecutionItemOutcome.NotAttempted))
                 {
                     throw new ArgumentException(
-                        "Interrupted requires an applied prefix followed only by cancellation or not-attempted items.",
+                        "Interrupted requires a cancellation problem and an applied prefix followed by a not-applied/not-attempted suffix.",
                         nameof(outcome));
                 }
 
                 break;
 
             case ExecutionOutcome.RecoveryRequired:
-                int firstUnapplied = Array.FindIndex(
+                int recoveryPoint = Array.FindIndex(
                     items,
                     item => item.Outcome != ExecutionItemOutcome.Applied);
-                if (firstUnapplied < 0
-                    || items.Skip(firstUnapplied).All(
+                if (recoveryPoint < 0
+                    || items.Skip(recoveryPoint).All(
                         item => item.Outcome == ExecutionItemOutcome.NotAttempted))
                 {
                     break;
                 }
 
-                int ambiguous = Array.FindIndex(
-                    items,
-                    item => item.Outcome != ExecutionItemOutcome.Applied);
-                if (ambiguous < 0
-                    || items[ambiguous].Outcome != ExecutionItemOutcome.Ambiguous
-                    || items.Skip(ambiguous + 1).Any(
+                if (items[recoveryPoint].Outcome is not (
+                        ExecutionItemOutcome.NotApplied or ExecutionItemOutcome.Ambiguous)
+                    || items.Skip(recoveryPoint + 1).Any(
                         item => item.Outcome != ExecutionItemOutcome.NotAttempted))
                 {
                     throw new ArgumentException(
-                        "RecoveryRequired requires an applied prefix, one ambiguous item, and a not-attempted suffix.",
+                        "RecoveryRequired requires an applied prefix, an optional paused or ambiguous item, and a not-attempted suffix.",
                         nameof(outcome));
                 }
 

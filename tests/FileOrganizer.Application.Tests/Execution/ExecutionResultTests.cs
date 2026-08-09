@@ -280,28 +280,30 @@ public sealed class ExecutionResultTests
     }
 
     [Fact]
-    public void RejectsAStoppedRunThatSkipsAnEarlierOrdinalBeforeItsFailure()
+    public void RepresentsAWholeManifestPreflightFailureAtALaterOrdinal()
     {
         ExecutionManifest manifest = ManifestWithTwoMoves();
         ExecutionProblem conflict = new(
             ExecutionProblemKind.DestinationConflict,
-            "The later operation found an existing target.",
+            "Whole-manifest preflight found an existing target.",
             operationOrdinal: 1);
 
-        Assert.Throws<ArgumentException>(
-            () => new ExecutionResult(
-                manifest,
-                StartedAt,
-                FinishedAt,
-                ExecutionOutcome.Stopped,
-                [
-                    new ExecutionItemResult(0, ExecutionItemOutcome.NotAttempted, []),
-                    new ExecutionItemResult(
-                        1,
-                        ExecutionItemOutcome.Conflict,
-                        [conflict]),
-                ],
-                [conflict]));
+        ExecutionResult result = new(
+            manifest,
+            StartedAt,
+            FinishedAt,
+            ExecutionOutcome.Stopped,
+            [
+                new ExecutionItemResult(0, ExecutionItemOutcome.NotAttempted, []),
+                new ExecutionItemResult(
+                    1,
+                    ExecutionItemOutcome.Conflict,
+                    [conflict]),
+            ],
+            [conflict]);
+
+        Assert.Equal(ExecutionItemOutcome.NotAttempted, result.Items[0].Outcome);
+        Assert.Equal(ExecutionItemOutcome.Conflict, result.Items[1].Outcome);
     }
 
     [Fact]
