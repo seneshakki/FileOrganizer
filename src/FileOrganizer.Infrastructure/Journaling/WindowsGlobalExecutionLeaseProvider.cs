@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using FileOrganizer.Application.Journaling;
 
 namespace FileOrganizer.Infrastructure.Journaling;
@@ -15,6 +16,28 @@ namespace FileOrganizer.Infrastructure.Journaling;
 public sealed class WindowsGlobalExecutionLeaseProvider : IGlobalExecutionLeaseProvider
 {
     internal const string MutexName = @"Local\FileOrganizer.ExecutionRecovery.v1";
+
+    /// <summary>
+    /// Borrows a genuine, live lease issued by this provider. The borrow keeps
+    /// the named mutex owned until both it and the public lease are disposed.
+    /// </summary>
+    /// <remarks>
+    /// The exact private implementation check prevents a caller-defined
+    /// <see cref="IGlobalExecutionLease"/> marker from authorizing Windows
+    /// filesystem operations.
+    /// </remarks>
+    internal static bool TryBorrow(
+        IGlobalExecutionLease? executionLease,
+        [NotNullWhen(true)] out IWindowsExecutionLeaseBorrow? borrow)
+    {
+        if (executionLease is MutexLease mutexLease)
+        {
+            return mutexLease.TryBorrow(out borrow);
+        }
+
+        borrow = null;
+        return false;
+    }
 
     public ValueTask<GlobalExecutionLeaseAcquisition> AcquireAsync(
         TimeSpan timeout,
@@ -312,21 +335,82 @@ public sealed class WindowsGlobalExecutionLeaseProvider : IGlobalExecutionLeaseP
     private sealed class MutexLease : IGlobalExecutionLease
     {
         private readonly MutexOwnerWorker _owner;
-        private int _disposeRequested;
+        private readonly object _stateLock = new();
+        private int _borrowCount;
+        private bool _disposeRequested;
 
         internal MutexLease(MutexOwnerWorker owner)
         {
             _owner = owner;
         }
 
+        internal bool TryBorrow(
+            [NotNullWhen(true)] out IWindowsExecutionLeaseBorrow? borrow)
+        {
+            lock (_stateLock)
+            {
+                if (_disposeRequested)
+                {
+                    borrow = null;
+                    return false;
+                }
+
+                _borrowCount = checked(_borrowCount + 1);
+                borrow = new LeaseBorrow(this);
+                return true;
+            }
+        }
+
         public ValueTask DisposeAsync()
         {
-            if (Interlocked.Exchange(ref _disposeRequested, 1) == 0)
+            bool requestRelease = false;
+            lock (_stateLock)
+            {
+                if (!_disposeRequested)
+                {
+                    _disposeRequested = true;
+                    requestRelease = _borrowCount == 0;
+                }
+            }
+
+            if (requestRelease)
             {
                 _owner.RequestRelease();
             }
 
             return new ValueTask(_owner.ReleaseCompletion);
+        }
+
+        private void ReturnBorrow()
+        {
+            bool requestRelease;
+            lock (_stateLock)
+            {
+                Debug.Assert(_borrowCount > 0, "A lease borrow was returned more than once.");
+                _borrowCount--;
+                requestRelease = _disposeRequested && _borrowCount == 0;
+            }
+
+            if (requestRelease)
+            {
+                _owner.RequestRelease();
+            }
+        }
+
+        private sealed class LeaseBorrow : IWindowsExecutionLeaseBorrow
+        {
+            private MutexLease? _lease;
+
+            internal LeaseBorrow(MutexLease lease)
+            {
+                _lease = lease;
+            }
+
+            public void Dispose()
+            {
+                MutexLease? lease = Interlocked.Exchange(ref _lease, null);
+                lease?.ReturnBorrow();
+            }
         }
     }
 }

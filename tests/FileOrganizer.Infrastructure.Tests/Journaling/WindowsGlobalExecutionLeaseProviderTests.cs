@@ -84,6 +84,62 @@ public sealed class WindowsGlobalExecutionLeaseProviderTests
     }
 
     [Fact]
+    public async Task BorrowPinsMutexUntilBorrowAndPublicLeaseAreDisposed()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows named mutex test.");
+
+        var provider = new WindowsGlobalExecutionLeaseProvider();
+        GlobalExecutionLeaseAcquisition acquisition = await provider.AcquireAsync(
+            TimeSpan.Zero,
+            TestContext.Current.CancellationToken);
+        IGlobalExecutionLease lease =
+            Assert.IsAssignableFrom<IGlobalExecutionLease>(acquisition.Lease);
+        IWindowsExecutionLeaseBorrow? borrow = null;
+        try
+        {
+            Assert.True(WindowsGlobalExecutionLeaseProvider.TryBorrow(lease, out borrow));
+            Assert.NotNull(borrow);
+
+            Task disposal = lease.DisposeAsync().AsTask();
+
+            Assert.False(disposal.IsCompleted);
+            Assert.False(WindowsGlobalExecutionLeaseProvider.TryBorrow(lease, out var afterDispose));
+            Assert.Null(afterDispose);
+
+            GlobalExecutionLeaseAcquisition blocked = await provider.AcquireAsync(
+                TimeSpan.Zero,
+                TestContext.Current.CancellationToken);
+            Assert.Equal(GlobalExecutionLeaseAcquisitionStatus.Busy, blocked.Status);
+
+            borrow.Dispose();
+            borrow.Dispose();
+            await disposal.WaitAsync(TestContext.Current.CancellationToken);
+
+            GlobalExecutionLeaseAcquisition reacquired = await provider.AcquireAsync(
+                TimeSpan.FromSeconds(1),
+                TestContext.Current.CancellationToken);
+            Assert.Equal(GlobalExecutionLeaseAcquisitionStatus.Acquired, reacquired.Status);
+            await Assert.IsAssignableFrom<IGlobalExecutionLease>(reacquired.Lease).DisposeAsync();
+        }
+        finally
+        {
+            borrow?.Dispose();
+            await lease.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task TryBorrowRejectsForeignAndNullLeaseCapabilities()
+    {
+        await using var foreignLease = new ForeignExecutionLease();
+
+        Assert.False(WindowsGlobalExecutionLeaseProvider.TryBorrow(foreignLease, out var foreign));
+        Assert.Null(foreign);
+        Assert.False(WindowsGlobalExecutionLeaseProvider.TryBorrow(null, out var missing));
+        Assert.Null(missing);
+    }
+
+    [Fact]
     public async Task AcquireAsyncAfterAbandonedOwnerReportsMetadataAndRetainsOwnership()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows named mutex test.");
@@ -199,5 +255,10 @@ public sealed class WindowsGlobalExecutionLeaseProviderTests
         Assert.Equal(GlobalExecutionLeaseAcquisitionStatus.Unsupported, result.Status);
         Assert.Equal(GlobalExecutionLeaseFailureKind.UnsupportedPlatform, result.FailureKind);
         Assert.Null(result.Lease);
+    }
+
+    private sealed class ForeignExecutionLease : IGlobalExecutionLease
+    {
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }
