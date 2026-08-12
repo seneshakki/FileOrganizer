@@ -18,4 +18,7 @@ public enum ExecutionRecoveryOutcome
     ManualRecoveryRequired,
     Interrupted,
     InvalidJournal,
+
+    /// <summary>The required execution/recovery lease could not be provided.</summary>
+    LeaseUnavailable,
 }

@@ -72,6 +72,8 @@ public sealed class OrganizationPlanExecutorTests
         Assert.Equal(
             [ExecutionProblemKind.SourceRevalidationFailed, ExecutionProblemKind.DestinationConflict],
             result.Problems.Select(problem => problem.Kind));
+        Assert.Equal(1, context.GlobalLease.AcquisitionCount);
+        Assert.Equal(1, context.Journal.ReadCount);
         Assert.Equal(0, context.Journal.BeginCount);
         Assert.Empty(context.Moves.AcquiredOrdinals);
     }
@@ -100,6 +102,7 @@ public sealed class OrganizationPlanExecutorTests
         Assert.Equal(0, context.Preflight.CallCount);
         Assert.Equal(0, context.Journal.BeginCount);
         Assert.Empty(context.Moves.AcquiredOrdinals);
+        Assert.False(context.GlobalLease.IsOwned);
     }
 
     [Fact]
@@ -687,7 +690,7 @@ public sealed class OrganizationPlanExecutorTests
     {
         OrganizationPlan plan = Plan(1);
         Harness context = new();
-        context.GlobalLease.IsAvailable = false;
+        context.GlobalLease.NextStatus = GlobalExecutionLeaseAcquisitionStatus.Busy;
         PlanFingerprint fingerprint = Compile(plan).Fingerprint;
 
         ExecutionResult execution = await context.ExecuteAsync(plan);
@@ -695,6 +698,41 @@ public sealed class OrganizationPlanExecutorTests
 
         Assert.Equal(ExecutionOutcome.Stopped, execution.Outcome);
         Assert.Equal(ExecutionRecoveryOutcome.Busy, recovery.Outcome);
+        Assert.Equal(0, context.Journal.ReadCount);
+        Assert.Equal(0, context.Journal.BeginCount);
+        Assert.Equal(0, context.Journal.PublishCount);
+        Assert.Equal(0, context.Preflight.CallCount);
+        Assert.Empty(context.Moves.AcquiredOrdinals);
+        Assert.Empty(context.Moves.RecoveryObservedOrdinals);
+    }
+
+    [Theory]
+    [InlineData(
+        GlobalExecutionLeaseAcquisitionStatus.Unsupported,
+        ExecutionProblemKind.ExecutionLeaseUnsupported)]
+    [InlineData(
+        GlobalExecutionLeaseAcquisitionStatus.Failed,
+        ExecutionProblemKind.ExecutionLeaseAcquisitionFailed)]
+    public async Task UnavailableGlobalLeaseFailsStopBeforeJournalOrFilesystemPorts(
+        GlobalExecutionLeaseAcquisitionStatus status,
+        ExecutionProblemKind expectedProblem)
+    {
+        OrganizationPlan plan = Plan(1);
+        Harness context = new();
+        context.GlobalLease.NextStatus = status;
+        PlanFingerprint fingerprint = Compile(plan).Fingerprint;
+
+        ExecutionResult execution = await context.ExecuteAsync(plan);
+        ExecutionRecoveryResult recovery = await context.RecoverAsync(fingerprint);
+
+        Assert.Equal(ExecutionOutcome.Stopped, execution.Outcome);
+        Assert.Equal(expectedProblem, Assert.Single(execution.Problems).Kind);
+        Assert.Equal(ExecutionRecoveryOutcome.LeaseUnavailable, recovery.Outcome);
+        Assert.Equal(expectedProblem, Assert.Single(recovery.Problems).Kind);
+        Assert.Equal(0, context.Journal.ReadCount);
+        Assert.Equal(0, context.Journal.BeginCount);
+        Assert.Equal(0, context.Journal.PublishCount);
+        Assert.Equal(0, context.Preflight.CallCount);
         Assert.Empty(context.Moves.AcquiredOrdinals);
         Assert.Empty(context.Moves.RecoveryObservedOrdinals);
     }
@@ -720,16 +758,22 @@ public sealed class OrganizationPlanExecutorTests
     {
         FakeGlobalExecutionLeaseProvider provider = new();
         IGlobalExecutionLease first = Assert.IsAssignableFrom<IGlobalExecutionLease>(
-            await provider.TryAcquireAsync(TestContext.Current.CancellationToken));
+            (await provider.AcquireAsync(
+                TimeSpan.Zero,
+                TestContext.Current.CancellationToken)).Lease);
         await first.DisposeAsync();
         IGlobalExecutionLease second = Assert.IsAssignableFrom<IGlobalExecutionLease>(
-            await provider.TryAcquireAsync(TestContext.Current.CancellationToken));
+            (await provider.AcquireAsync(
+                TimeSpan.Zero,
+                TestContext.Current.CancellationToken)).Lease);
 
         await first.DisposeAsync();
-        IGlobalExecutionLease? third = await provider.TryAcquireAsync(
+        GlobalExecutionLeaseAcquisition third = await provider.AcquireAsync(
+            TimeSpan.Zero,
             TestContext.Current.CancellationToken);
 
-        Assert.Null(third);
+        Assert.Equal(GlobalExecutionLeaseAcquisitionStatus.Busy, third.Status);
+        Assert.Null(third.Lease);
         await second.DisposeAsync();
     }
 

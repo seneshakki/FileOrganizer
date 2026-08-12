@@ -140,16 +140,22 @@ public sealed class FakeJournalBoundaryTests
         FakeGlobalExecutionLeaseProvider provider = new();
         CancellationToken cancellationToken = TestContext.Current.CancellationToken;
 
-        IGlobalExecutionLease? first = await provider.TryAcquireAsync(cancellationToken);
-        IGlobalExecutionLease? second = await provider.TryAcquireAsync(cancellationToken);
+        GlobalExecutionLeaseAcquisition first = await provider.AcquireAsync(
+            TimeSpan.Zero,
+            cancellationToken);
+        GlobalExecutionLeaseAcquisition second = await provider.AcquireAsync(
+            TimeSpan.Zero,
+            cancellationToken);
 
-        Assert.NotNull(first);
-        Assert.Null(second);
+        Assert.Equal(GlobalExecutionLeaseAcquisitionStatus.Acquired, first.Status);
+        Assert.Equal(GlobalExecutionLeaseAcquisitionStatus.Busy, second.Status);
 
-        await first.DisposeAsync();
-        IGlobalExecutionLease? afterRelease = await provider.TryAcquireAsync(cancellationToken);
-        Assert.NotNull(afterRelease);
-        await afterRelease.DisposeAsync();
+        await first.Lease!.DisposeAsync();
+        GlobalExecutionLeaseAcquisition afterRelease = await provider.AcquireAsync(
+            TimeSpan.Zero,
+            cancellationToken);
+        Assert.Equal(GlobalExecutionLeaseAcquisitionStatus.Acquired, afterRelease.Status);
+        await afterRelease.Lease!.DisposeAsync();
     }
 
     private static ValueTask<JournalBeginResult> BeginAsync(
@@ -343,17 +349,26 @@ public sealed class FakeJournalBoundaryTests
     {
         private int _isOwned;
 
-        public ValueTask<IGlobalExecutionLease?> TryAcquireAsync(
+        public ValueTask<GlobalExecutionLeaseAcquisition> AcquireAsync(
+            TimeSpan timeout,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (timeout < TimeSpan.Zero || timeout == Timeout.InfiniteTimeSpan)
+            {
+                throw new ArgumentOutOfRangeException(nameof(timeout));
+            }
+
             IGlobalExecutionLease? lease = Interlocked.CompareExchange(
                 ref _isOwned,
                 1,
                 0) == 0
                 ? new Lease(this)
                 : null;
-            return ValueTask.FromResult(lease);
+            return ValueTask.FromResult(
+                lease is null
+                    ? GlobalExecutionLeaseAcquisition.Busy()
+                    : GlobalExecutionLeaseAcquisition.Acquired(lease));
         }
 
         private sealed class Lease(FakeGlobalExecutionLeaseProvider owner) : IGlobalExecutionLease

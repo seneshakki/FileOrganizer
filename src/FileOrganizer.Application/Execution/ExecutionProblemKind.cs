@@ -35,4 +35,10 @@ public enum ExecutionProblemKind
 
     /// <summary>The durable state requires explicit recovery before execution can continue.</summary>
     RecoveryRequired,
+
+    /// <summary>The current platform cannot provide the required execution lease.</summary>
+    ExecutionLeaseUnsupported,
+
+    /// <summary>The operating system failed to acquire the execution lease safely.</summary>
+    ExecutionLeaseAcquisitionFailed,
 }

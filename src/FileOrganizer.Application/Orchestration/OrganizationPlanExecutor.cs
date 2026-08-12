@@ -81,31 +81,23 @@ public sealed class OrganizationPlanExecutor
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        IGlobalExecutionLease? executionLease =
-            await _globalLease.TryAcquireAsync(cancellationToken).ConfigureAwait(false);
-        if (cancellationToken.IsCancellationRequested)
+        GlobalExecutionLeaseAcquisition leaseAcquisition =
+            await _globalLease.AcquireAsync(TimeSpan.Zero, cancellationToken)
+                .ConfigureAwait(false);
+        if (leaseAcquisition.Status != GlobalExecutionLeaseAcquisitionStatus.Acquired)
         {
-            if (executionLease is not null)
-            {
-                await executionLease.DisposeAsync().ConfigureAwait(false);
-            }
-
             cancellationToken.ThrowIfCancellationRequested();
-        }
-        if (executionLease is null)
-        {
-            ExecutionProblem busy = new(
-                ExecutionProblemKind.ExecutionAlreadyInProgress,
-                "Another execution or recovery operation currently owns the global lease.");
             return CreateNotAttemptedResult(
                 manifest,
                 attemptStartedAt,
                 ExecutionOutcome.Stopped,
-                [busy]);
+                [LeaseAcquisitionProblem(leaseAcquisition)]);
         }
 
+        IGlobalExecutionLease executionLease = leaseAcquisition.Lease!;
         await using (executionLease.ConfigureAwait(false))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             ExecutionJournalReadResult existing = await _journal.ReadForReplayAsync(
                     manifest.Fingerprint,
                     cancellationToken)
@@ -412,32 +404,25 @@ public sealed class OrganizationPlanExecutor
         ArgumentNullException.ThrowIfNull(fingerprint);
         cancellationToken.ThrowIfCancellationRequested();
 
-        IGlobalExecutionLease? executionLease =
-            await _globalLease.TryAcquireAsync(cancellationToken).ConfigureAwait(false);
-        if (cancellationToken.IsCancellationRequested)
+        GlobalExecutionLeaseAcquisition leaseAcquisition =
+            await _globalLease.AcquireAsync(TimeSpan.Zero, cancellationToken)
+                .ConfigureAwait(false);
+        if (leaseAcquisition.Status != GlobalExecutionLeaseAcquisitionStatus.Acquired)
         {
-            if (executionLease is not null)
-            {
-                await executionLease.DisposeAsync().ConfigureAwait(false);
-            }
-
             cancellationToken.ThrowIfCancellationRequested();
-        }
-        if (executionLease is null)
-        {
+            ExecutionProblem leaseProblem = LeaseAcquisitionProblem(leaseAcquisition);
             return new ExecutionRecoveryResult(
                 fingerprint,
-                ExecutionRecoveryOutcome.Busy,
-                problems:
-                [
-                    new ExecutionProblem(
-                        ExecutionProblemKind.ExecutionAlreadyInProgress,
-                        "Another execution or recovery operation currently owns the global lease."),
-                ]);
+                leaseAcquisition.Status == GlobalExecutionLeaseAcquisitionStatus.Busy
+                    ? ExecutionRecoveryOutcome.Busy
+                    : ExecutionRecoveryOutcome.LeaseUnavailable,
+                problems: [leaseProblem]);
         }
 
+        IGlobalExecutionLease executionLease = leaseAcquisition.Lease!;
         await using (executionLease.ConfigureAwait(false))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             ExecutionJournalReadResult read = await _journal.ReadForReplayAsync(
                     fingerprint,
                     cancellationToken)
@@ -1139,6 +1124,23 @@ public sealed class OrganizationPlanExecutor
 
     private static ExecutionItemResult NotAttempted(int ordinal) =>
         new(ordinal, ExecutionItemOutcome.NotAttempted, []);
+
+    private static ExecutionProblem LeaseAcquisitionProblem(
+        GlobalExecutionLeaseAcquisition acquisition) => acquisition.Status switch
+        {
+            GlobalExecutionLeaseAcquisitionStatus.Busy => new ExecutionProblem(
+                ExecutionProblemKind.ExecutionAlreadyInProgress,
+                "Another execution or recovery operation currently owns the global lease."),
+            GlobalExecutionLeaseAcquisitionStatus.Unsupported => new ExecutionProblem(
+                ExecutionProblemKind.ExecutionLeaseUnsupported,
+                "The current platform cannot provide the required execution lease."),
+            GlobalExecutionLeaseAcquisitionStatus.Failed => new ExecutionProblem(
+                ExecutionProblemKind.ExecutionLeaseAcquisitionFailed,
+                "The operating system could not acquire the execution lease safely."),
+            _ => throw new ArgumentException(
+                "An acquired lease is not an acquisition failure.",
+                nameof(acquisition)),
+        };
 
     private ExecutionResult CreatePreflightFailureResult(
         ExecutionManifest manifest,

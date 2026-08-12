@@ -227,6 +227,26 @@ public sealed class ExecutionRecoveryResult
 
                 break;
 
+            case ExecutionRecoveryOutcome.LeaseUnavailable:
+                if (manifest is not null
+                    || resolution is not null
+                    || nextOperationOrdinal is not null
+                    || journalWasUpdated
+                    || journalState is not null
+                    || journalProblems.Length != 0
+                    || problems.Length == 0
+                    || problems.Any(
+                        problem => problem.Kind is not (
+                            ExecutionProblemKind.ExecutionLeaseUnsupported
+                            or ExecutionProblemKind.ExecutionLeaseAcquisitionFailed)))
+                {
+                    throw new ArgumentException(
+                        "Unavailable recovery has no journal state and requires a lease failure problem.",
+                        nameof(outcome));
+                }
+
+                break;
+
             case ExecutionRecoveryOutcome.Completed:
                 if (manifest is null
                     || resolution is not null

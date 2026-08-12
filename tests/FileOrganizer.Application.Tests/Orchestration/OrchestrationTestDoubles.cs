@@ -17,34 +17,56 @@ internal sealed class FakeGlobalExecutionLeaseProvider : IGlobalExecutionLeasePr
 {
     private object? _owner;
     private int _acquisitionCount;
-    private int _isAvailable = 1;
 
-    internal bool IsAvailable
-    {
-        get => Volatile.Read(ref _isAvailable) != 0;
-        set => Volatile.Write(ref _isAvailable, value ? 1 : 0);
-    }
+    internal GlobalExecutionLeaseAcquisitionStatus NextStatus { get; set; } =
+        GlobalExecutionLeaseAcquisitionStatus.Acquired;
+
+    internal GlobalExecutionLeaseFailureKind FailureKind { get; set; } =
+        GlobalExecutionLeaseFailureKind.SynchronizationFailure;
+
+    internal bool PreviousOwnerAbandoned { get; set; }
 
     internal int AcquisitionCount => Volatile.Read(ref _acquisitionCount);
 
-    public ValueTask<IGlobalExecutionLease?> TryAcquireAsync(
+    internal bool IsOwned => Volatile.Read(ref _owner) is not null;
+
+    public ValueTask<GlobalExecutionLeaseAcquisition> AcquireAsync(
+        TimeSpan timeout,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (timeout < TimeSpan.Zero || timeout == Timeout.InfiniteTimeSpan)
+        {
+            throw new ArgumentOutOfRangeException(nameof(timeout));
+        }
+
         Interlocked.Increment(ref _acquisitionCount);
 
-        if (!IsAvailable)
+        if (NextStatus == GlobalExecutionLeaseAcquisitionStatus.Busy)
         {
-            return ValueTask.FromResult<IGlobalExecutionLease?>(null);
+            return ValueTask.FromResult(GlobalExecutionLeaseAcquisition.Busy());
+        }
+
+        if (NextStatus == GlobalExecutionLeaseAcquisitionStatus.Unsupported)
+        {
+            return ValueTask.FromResult(GlobalExecutionLeaseAcquisition.Unsupported());
+        }
+
+        if (NextStatus == GlobalExecutionLeaseAcquisitionStatus.Failed)
+        {
+            return ValueTask.FromResult(GlobalExecutionLeaseAcquisition.Failed(FailureKind));
         }
 
         object owner = new();
         if (Interlocked.CompareExchange(ref _owner, owner, null) is not null)
         {
-            return ValueTask.FromResult<IGlobalExecutionLease?>(null);
+            return ValueTask.FromResult(GlobalExecutionLeaseAcquisition.Busy());
         }
 
-        return ValueTask.FromResult<IGlobalExecutionLease?>(new Lease(this, owner));
+        return ValueTask.FromResult(
+            GlobalExecutionLeaseAcquisition.Acquired(
+                new Lease(this, owner),
+                PreviousOwnerAbandoned));
     }
 
     private void Release(object owner) =>
