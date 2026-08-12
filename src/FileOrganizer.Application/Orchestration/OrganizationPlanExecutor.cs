@@ -438,17 +438,34 @@ public sealed class OrganizationPlanExecutor
 
         await using (executionLease.ConfigureAwait(false))
         {
-            ExecutionJournalSnapshot? snapshot = await _journal.ReadAsync(
+            ExecutionJournalReadResult read = await _journal.ReadForReplayAsync(
                     fingerprint,
                     cancellationToken)
                 .ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
-            if (snapshot is null)
+            if (read.Status == ExecutionJournalReadStatus.NotFound)
             {
                 return new ExecutionRecoveryResult(
                     fingerprint,
-                    ExecutionRecoveryOutcome.NoJournal);
+                    ExecutionRecoveryOutcome.NoJournal,
+                    journalProblems: read.Problems);
             }
+
+            if (read.Status == ExecutionJournalReadStatus.Invalid)
+            {
+                return new ExecutionRecoveryResult(
+                    fingerprint,
+                    ExecutionRecoveryOutcome.InvalidJournal,
+                    problems:
+                    [
+                        new ExecutionProblem(
+                            ExecutionProblemKind.InvalidJournal,
+                            "The durable journal requires manual intervention before recovery."),
+                    ],
+                    journalProblems: read.Problems);
+            }
+
+            ExecutionJournalSnapshot snapshot = read.Snapshot!;
 
             if (!snapshot.Fingerprint.Equals(fingerprint))
             {

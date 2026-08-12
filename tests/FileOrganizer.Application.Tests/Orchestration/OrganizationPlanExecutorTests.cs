@@ -362,6 +362,30 @@ public sealed class OrganizationPlanExecutorTests
     }
 
     [Fact]
+    public async Task CorruptDurableReadRequiresManualRecoveryWithoutObservationOrPublication()
+    {
+        OrganizationPlan plan = Plan(1);
+        PlanFingerprint fingerprint = Compile(plan).Fingerprint;
+        Harness context = new();
+        context.Journal.ReplayReadOverride = _ => new ExecutionJournalReadResult(
+            ExecutionJournalReadStatus.Invalid,
+            problems:
+            [
+                new ExecutionJournalReadProblem(
+                    ExecutionJournalReadProblemKind.ManifestMalformed),
+            ]);
+
+        ExecutionRecoveryResult result = await context.RecoverAsync(fingerprint);
+
+        Assert.Equal(ExecutionRecoveryOutcome.InvalidJournal, result.Outcome);
+        Assert.Equal(
+            ExecutionJournalReadProblemKind.ManifestMalformed,
+            Assert.Single(result.JournalProblems).Kind);
+        Assert.Empty(context.Moves.RecoveryObservedOrdinals);
+        Assert.Equal(0, context.Journal.PublishCount);
+    }
+
+    [Fact]
     public async Task JournalCorruptionDiscoveredAtAtomicBeginFailsStopBeforeAnyMove()
     {
         OrganizationPlan plan = Plan(1);
@@ -404,6 +428,46 @@ public sealed class OrganizationPlanExecutorTests
         Assert.Equal(ExecutionOutcome.RecoveryRequired, retry.Outcome);
         Assert.Equal(ExecutionItemOutcome.Ambiguous, Assert.Single(retry.Items).Outcome);
         Assert.Equal(commitCalls, context.Moves.CommittedOrdinals.Count);
+    }
+
+    [Fact]
+    public async Task DurableAmbiguousOutcomeNeverAutoResumesExecution()
+    {
+        OrganizationPlan plan = Plan(1);
+        ExecutionManifest manifest = Compile(plan);
+        Harness context = new();
+        context.Journal.Seed(
+            manifest,
+            [
+                ExecutionJournalRecord.ExecutionStarted(
+                    TestExecutionRuns.Id,
+                    manifest.Fingerprint,
+                    0,
+                    ExecutionTime),
+                ExecutionJournalRecord.MoveIntent(
+                    TestExecutionRuns.Id,
+                    manifest.Fingerprint,
+                    1,
+                    ExecutionTime.AddSeconds(1),
+                    0,
+                    manifest.Items[0].SourcePrecondition.PhysicalIdentity!),
+                ExecutionJournalRecord.MoveAmbiguous(
+                    TestExecutionRuns.Id,
+                    manifest.Fingerprint,
+                    2,
+                    ExecutionTime.AddSeconds(2),
+                    0,
+                    JournalRecordReasonKind.MoveOutcomeUnknown),
+            ]);
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(ExecutionItemOutcome.Ambiguous, Assert.Single(result.Items).Outcome);
+        Assert.Equal(0, context.Preflight.CallCount);
+        Assert.Equal(0, context.Journal.BeginCount);
+        Assert.Empty(context.Moves.AcquiredOrdinals);
+        Assert.Empty(context.Moves.CommittedOrdinals);
     }
 
     [Fact]
