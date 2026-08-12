@@ -96,8 +96,89 @@ public sealed class FileExecutionJournalStoreTests
         JournalBeginResult result = await store.BeginAsync(changed, differentStart, token);
 
         Assert.Equal(JournalBeginStatus.AlreadyExists, result.Status);
-        Assert.Equal(RunId, result.Snapshot.RunId);
+        Assert.Equal(RunId, Assert.IsType<ExecutionJournalSnapshot>(result.Snapshot).RunId);
         Assert.Equal(before, File.ReadAllBytes(manifestPath));
+    }
+
+    [Fact]
+    public async Task CorruptSameFingerprintReturnsStructuredInvalidBeginWithoutOverwrite()
+    {
+        using TemporaryDirectory temp = TemporaryDirectory.Create();
+        string root = Path.Combine(temp.FullPath, "journal");
+        FileExecutionJournalStore store = new(root);
+        ExecutionManifest manifest = JournalStoreTestManifest.Create();
+        CancellationToken token = TestContext.Current.CancellationToken;
+        await store.BeginAsync(manifest, Start(manifest), token);
+        string manifestPath = Path.Combine(root, manifest.Fingerprint.Value, "manifest.json");
+        File.WriteAllText(manifestPath, "not-json");
+
+        JournalBeginResult result = await store.BeginAsync(manifest, Start(manifest), token);
+
+        Assert.Equal(JournalBeginStatus.InvalidExistingJournal, result.Status);
+        Assert.Null(result.Snapshot);
+        Assert.Equal(manifest.Fingerprint, result.ExistingFingerprint);
+        Assert.Equal(
+            ExecutionJournalReadProblemKind.ManifestMalformed,
+            Assert.Single(result.Problems).Kind);
+        Assert.Equal("not-json", File.ReadAllText(manifestPath));
+    }
+
+    [Fact]
+    public async Task CorruptDifferentFingerprintBlocksBeginWithItsStructuredOwnership()
+    {
+        using TemporaryDirectory temp = TemporaryDirectory.Create();
+        string root = Path.Combine(temp.FullPath, "journal");
+        FileExecutionJournalStore store = new(root);
+        ExecutionManifest blocker = JournalStoreTestManifest.Create("blocker");
+        ExecutionManifest requested = JournalStoreTestManifest.Create("requested");
+        Assert.NotEqual(blocker.Fingerprint, requested.Fingerprint);
+        CancellationToken token = TestContext.Current.CancellationToken;
+        await store.BeginAsync(blocker, Start(blocker), token);
+        string blockerManifest = Path.Combine(root, blocker.Fingerprint.Value, "manifest.json");
+        File.WriteAllText(blockerManifest, "not-json");
+
+        JournalBeginResult result = await store.BeginAsync(requested, Start(requested), token);
+
+        Assert.Equal(JournalBeginStatus.InvalidExistingJournal, result.Status);
+        Assert.Null(result.Snapshot);
+        Assert.Equal(blocker.Fingerprint, result.ExistingFingerprint);
+        Assert.Equal(
+            ExecutionJournalReadProblemKind.ManifestMalformed,
+            Assert.Single(result.Problems).Kind);
+        Assert.False(Directory.Exists(Path.Combine(root, requested.Fingerprint.Value)));
+        Assert.Equal("not-json", File.ReadAllText(blockerManifest));
+    }
+
+    [Fact]
+    public async Task MultipleUnresolvedOwnersBecomeCorruptionInsteadOfFirstOwnerWins()
+    {
+        using TemporaryDirectory temp = TemporaryDirectory.Create();
+        string root = Path.Combine(temp.FullPath, "journal");
+        string secondRoot = Path.Combine(temp.FullPath, "second-journal");
+        FileExecutionJournalStore firstStore = new(root);
+        FileExecutionJournalStore secondStore = new(secondRoot);
+        ExecutionManifest first = JournalStoreTestManifest.Create("first-owner");
+        ExecutionManifest second = JournalStoreTestManifest.Create("second-owner");
+        ExecutionManifest requested = JournalStoreTestManifest.Create("requested-owner");
+        CancellationToken token = TestContext.Current.CancellationToken;
+        await firstStore.BeginAsync(first, Start(first), token);
+        await secondStore.BeginAsync(second, Start(second), token);
+        Directory.Move(
+            Path.Combine(secondRoot, second.Fingerprint.Value),
+            Path.Combine(root, second.Fingerprint.Value));
+
+        JournalBeginResult result = await firstStore.BeginAsync(
+            requested,
+            Start(requested),
+            token);
+
+        Assert.Equal(JournalBeginStatus.InvalidExistingJournal, result.Status);
+        Assert.Null(result.Snapshot);
+        Assert.Null(result.ExistingFingerprint);
+        Assert.Equal(
+            ExecutionJournalReadProblemKind.ConflictingExecutionOwnership,
+            Assert.Single(result.Problems).Kind);
+        Assert.False(Directory.Exists(Path.Combine(root, requested.Fingerprint.Value)));
     }
 
     [Fact]
@@ -139,6 +220,75 @@ public sealed class FileExecutionJournalStoreTests
         JournalLoadResult malformed = await store.LoadDetailedAsync(manifest.Fingerprint, token);
         Assert.Equal(JournalLoadProblemKind.MalformedManifest, Assert.Single(malformed.Problems).Kind);
         Assert.Equal("not-json", File.ReadAllText(Path.Combine(directory, "manifest.json")));
+    }
+
+    [Fact]
+    public async Task ReplayReadDistinguishesAbsenceValidatedDataAndCorruption()
+    {
+        using TemporaryDirectory temp = TemporaryDirectory.Create();
+        string root = Path.Combine(temp.FullPath, "journal");
+        FileExecutionJournalStore store = new(root);
+        ExecutionManifest manifest = JournalStoreTestManifest.Create();
+        CancellationToken token = TestContext.Current.CancellationToken;
+
+        ExecutionJournalReadResult absent = await store.ReadForReplayAsync(
+            manifest.Fingerprint,
+            token);
+        Assert.Equal(ExecutionJournalReadStatus.NotFound, absent.Status);
+        Assert.Null(absent.Snapshot);
+        Assert.Empty(absent.Problems);
+
+        await store.BeginAsync(manifest, Start(manifest), token);
+        string directory = Path.Combine(root, manifest.Fingerprint.Value);
+        File.WriteAllText(
+            Path.Combine(directory, $".manifest.json.{new string('1', 32)}.tmp"),
+            "unpublished");
+        ExecutionJournalReadResult loaded = await store.ReadForReplayAsync(
+            manifest.Fingerprint,
+            token);
+        Assert.Equal(ExecutionJournalReadStatus.Loaded, loaded.Status);
+        Assert.Single(Assert.IsType<ExecutionJournalSnapshot>(loaded.Snapshot).Records);
+        Assert.Equal(
+            ExecutionJournalReadProblemKind.TemporaryArtifactIgnored,
+            Assert.Single(loaded.Problems).Kind);
+        Assert.Throws<NotSupportedException>(
+            () => ((IList<ExecutionJournalReadProblem>)loaded.Problems).Clear());
+
+        File.WriteAllText(Path.Combine(directory, "manifest.json"), "not-json");
+        ExecutionJournalReadResult invalid = await store.ReadForReplayAsync(
+            manifest.Fingerprint,
+            token);
+        Assert.Equal(ExecutionJournalReadStatus.Invalid, invalid.Status);
+        Assert.Null(invalid.Snapshot);
+        ExecutionJournalReadProblem problem = Assert.Single(invalid.Problems);
+        Assert.Equal(ExecutionJournalReadProblemKind.ManifestMalformed, problem.Kind);
+        Assert.True(problem.RequiresManualIntervention);
+    }
+
+    [Theory]
+    [MemberData(nameof(DurableProblemMappings))]
+    public void EveryDurableValidationProblemHasAStableApplicationMapping(
+        JournalLoadProblemKind durableKind,
+        ExecutionJournalReadProblemKind expectedKind)
+    {
+        JournalLoadProblem durable = new(
+            durableKind,
+            "Adapter-specific detail must not cross the replay boundary.",
+            RecordSequence: 7,
+            FileName: "private.record.json");
+        JournalLoadResult load = new(null, [durable]);
+
+        ExecutionJournalReadResult mapped = FileExecutionJournalStore.MapForReplay(load);
+
+        ExecutionJournalReadProblem problem = Assert.Single(mapped.Problems);
+        Assert.Equal(expectedKind, problem.Kind);
+        Assert.Equal(7, problem.RecordSequence);
+        Assert.Equal(
+            durableKind == JournalLoadProblemKind.TemporaryFilePresent
+                ? ExecutionJournalReadStatus.NotFound
+                : ExecutionJournalReadStatus.Invalid,
+            mapped.Status);
+        Assert.Null(mapped.Snapshot);
     }
 
     [Fact]
@@ -347,6 +497,83 @@ public sealed class FileExecutionJournalStoreTests
     }
 
     [Fact]
+    public async Task TemporaryDiagnosticsAndUnexpectedEntrySelectionUseOrdinalFileNameOrder()
+    {
+        using TemporaryDirectory temp = TemporaryDirectory.Create();
+        string root = Path.Combine(temp.FullPath, "journal");
+        FileExecutionJournalStore store = new(root);
+        ExecutionManifest manifest = JournalStoreTestManifest.Create();
+        CancellationToken token = TestContext.Current.CancellationToken;
+        await store.BeginAsync(manifest, Start(manifest), token);
+        string directory = Path.Combine(root, manifest.Fingerprint.Value);
+
+        File.WriteAllText(
+            Path.Combine(directory, $".manifest.json.{new string('f', 32)}.tmp"),
+            "later");
+        File.WriteAllText(
+            Path.Combine(directory, $".manifest.json.{new string('1', 32)}.tmp"),
+            "earlier");
+
+        JournalLoadResult temporary = await store.LoadDetailedAsync(manifest.Fingerprint, token);
+        Assert.Equal(
+            [
+                $".manifest.json.{new string('1', 32)}.tmp",
+                $".manifest.json.{new string('f', 32)}.tmp",
+            ],
+            temporary.Problems.Select(static problem => problem.FileName));
+
+        File.WriteAllText(Path.Combine(directory, "z-unexpected"), "later");
+        File.WriteAllText(Path.Combine(directory, "a-unexpected"), "earlier");
+
+        JournalLoadProblem unexpected = Assert.Single(
+            (await store.LoadDetailedAsync(manifest.Fingerprint, token)).Problems);
+        Assert.Equal(JournalLoadProblemKind.UnexpectedDurableEntry, unexpected.Kind);
+        Assert.Equal("a-unexpected", unexpected.FileName);
+    }
+
+    [Fact]
+    public async Task DurableRecordCreationOrderCannotChangeValidatedReplayOrder()
+    {
+        using TemporaryDirectory temp = TemporaryDirectory.Create();
+        string root = Path.Combine(temp.FullPath, "journal");
+        FileExecutionJournalStore store = new(root);
+        ExecutionManifest manifest = JournalStoreTestManifest.Create();
+        CancellationToken token = TestContext.Current.CancellationToken;
+        await store.BeginAsync(manifest, Start(manifest), token);
+        string directory = Path.Combine(root, manifest.Fingerprint.Value);
+        StoredJournalGenesis genesis = ReadGenesis(directory);
+        ExecutionJournalRecord intent = Intent(manifest, StartedAt.AddSeconds(1));
+        StoredJournalRecord storedIntent = JournalCanonicalHash.CreateRecord(
+            StoredJournalRecordPayload.From(intent, genesis.StartRecord.PayloadHash));
+        ExecutionJournalRecord notApplied = ExecutionJournalRecord.MoveNotApplied(
+            RunId,
+            manifest.Fingerprint,
+            2,
+            StartedAt.AddSeconds(2),
+            0,
+            JournalRecordReasonKind.MoveDidNotApply);
+        StoredJournalRecord storedNotApplied = JournalCanonicalHash.CreateRecord(
+            StoredJournalRecordPayload.From(notApplied, storedIntent.PayloadHash));
+
+        File.WriteAllBytes(
+            Path.Combine(directory, "00000000000000000002.record.json"),
+            JournalStorageCodec.EncodeRecord(storedNotApplied));
+        File.WriteAllBytes(
+            Path.Combine(directory, "00000000000000000001.record.json"),
+            JournalStorageCodec.EncodeRecord(storedIntent));
+
+        JournalLoadResult first = await store.LoadDetailedAsync(manifest.Fingerprint, token);
+        JournalLoadResult second = await store.LoadDetailedAsync(manifest.Fingerprint, token);
+
+        Assert.Equal(JournalLoadStatus.Loaded, first.Status);
+        Assert.Equal([0L, 1L, 2L], first.Snapshot!.Records.Select(static record => record.Sequence));
+        Assert.Equal(first.Snapshot.Records, second.Snapshot!.Records);
+        Assert.Equal(
+            ExecutionJournalStatus.Resumable,
+            ExecutionJournalStateMachine.Replay(first.Snapshot).Status);
+    }
+
+    [Fact]
     public async Task RootStagingDiagnosticDoesNotTurnAbsentFingerprintIntoInvalidJournal()
     {
         using TemporaryDirectory temp = TemporaryDirectory.Create();
@@ -529,6 +756,27 @@ public sealed class FileExecutionJournalStoreTests
             0,
             expectedEntryIdentity: null,
             JournalRecordReasonKind.MoveDidNotApply);
+
+    public static TheoryData<JournalLoadProblemKind, ExecutionJournalReadProblemKind>
+        DurableProblemMappings => new()
+        {
+            { JournalLoadProblemKind.MissingManifest, ExecutionJournalReadProblemKind.ManifestMissing },
+            { JournalLoadProblemKind.MalformedManifest, ExecutionJournalReadProblemKind.ManifestMalformed },
+            { JournalLoadProblemKind.UnsupportedJournalVersion, ExecutionJournalReadProblemKind.UnsupportedFormat },
+            { JournalLoadProblemKind.WrongFingerprint, ExecutionJournalReadProblemKind.FingerprintOwnershipMismatch },
+            { JournalLoadProblemKind.MalformedRecord, ExecutionJournalReadProblemKind.RecordMalformed },
+            { JournalLoadProblemKind.DuplicateSequence, ExecutionJournalReadProblemKind.SequenceViolation },
+            { JournalLoadProblemKind.SequenceGap, ExecutionJournalReadProblemKind.SequenceViolation },
+            { JournalLoadProblemKind.RecordFileNameMismatch, ExecutionJournalReadProblemKind.SequenceViolation },
+            { JournalLoadProblemKind.PayloadHashMismatch, ExecutionJournalReadProblemKind.PayloadIntegrityViolation },
+            { JournalLoadProblemKind.PreviousHashMismatch, ExecutionJournalReadProblemKind.HashChainViolation },
+            { JournalLoadProblemKind.WrongRunOwnership, ExecutionJournalReadProblemKind.RunOwnershipMismatch },
+            { JournalLoadProblemKind.RecordAfterTerminal, ExecutionJournalReadProblemKind.TerminalTail },
+            { JournalLoadProblemKind.TemporaryFilePresent, ExecutionJournalReadProblemKind.TemporaryArtifactIgnored },
+            { JournalLoadProblemKind.UnexpectedDurableEntry, ExecutionJournalReadProblemKind.UnexpectedStorageEntry },
+            { JournalLoadProblemKind.UnsafeJournalPath, ExecutionJournalReadProblemKind.UnsafeStorage },
+            { JournalLoadProblemKind.IoFailure, ExecutionJournalReadProblemKind.StorageReadFailure },
+        };
 
     private static void WriteRecord(string path, StoredJournalRecordPayload payload) =>
         File.WriteAllBytes(

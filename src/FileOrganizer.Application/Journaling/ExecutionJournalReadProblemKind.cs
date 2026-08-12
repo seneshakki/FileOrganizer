@@ -15,6 +15,8 @@ public enum ExecutionJournalReadProblemKind
     PayloadIntegrityViolation,
     HashChainViolation,
     RunOwnershipMismatch,
+    /// <summary>More than one durable execution claims unresolved global ownership.</summary>
+    ConflictingExecutionOwnership,
     TerminalTail,
     UnexpectedStorageEntry,
     TemporaryArtifactIgnored,

@@ -85,6 +85,19 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
         return result.Snapshot;
     }
 
+    /// <summary>
+    /// Reads and validates one durable journal for Application-owned replay.
+    /// Corrupt persistence never crosses this boundary as a replayable snapshot.
+    /// </summary>
+    public async ValueTask<ExecutionJournalReadResult> ReadForReplayAsync(
+        PlanFingerprint fingerprint,
+        CancellationToken cancellationToken = default)
+    {
+        JournalLoadResult result = await LoadDetailedAsync(fingerprint, cancellationToken)
+            .ConfigureAwait(false);
+        return MapForReplay(result);
+    }
+
     public async ValueTask<JournalLoadResult> LoadDetailedAsync(
         PlanFingerprint fingerprint,
         CancellationToken cancellationToken = default)
@@ -119,12 +132,11 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
             {
                 if (!same.Succeeded)
                 {
-                    throw new JournalStoreException(same);
+                    return InvalidBegin(manifest.Fingerprint, same);
                 }
-
-                return new JournalBeginResult(JournalBeginStatus.AlreadyExists, same.Snapshot!);
             }
 
+            List<(PlanFingerprint Fingerprint, ExecutionJournalSnapshot Snapshot)> unresolved = [];
             foreach (string executionDirectory in EnumerateExecutionDirectories())
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -135,19 +147,40 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
                         Failure(JournalLoadProblemKind.UnsafeJournalPath, "The journal root contains an invalid execution directory.", fileName: name));
                 }
 
-                JournalLoadResult other = LoadDetailedUnderGate(otherFingerprint!, cancellationToken);
+                JournalLoadResult other = otherFingerprint!.Equals(manifest.Fingerprint)
+                    ? same
+                    : LoadDetailedUnderGate(otherFingerprint, cancellationToken);
                 if (!other.Succeeded)
                 {
-                    throw new JournalStoreException(other);
+                    return InvalidBegin(otherFingerprint, other);
                 }
 
                 ExecutionJournalState state = ExecutionJournalStateMachine.Replay(other.Snapshot!);
                 if (!state.ReleasesGlobalExecutionOwnership)
                 {
-                    return new JournalBeginResult(
-                        JournalBeginStatus.BlockedByUnresolvedExecution,
-                        other.Snapshot!);
+                    unresolved.Add((otherFingerprint, other.Snapshot!));
                 }
+            }
+
+            if (unresolved.Count > 1)
+            {
+                return JournalBeginResult.ConflictingExecutionOwnership(
+                [
+                    new ExecutionJournalReadProblem(
+                        ExecutionJournalReadProblemKind.ConflictingExecutionOwnership),
+                ]);
+            }
+
+            if (same.Status == JournalLoadStatus.Loaded)
+            {
+                return new JournalBeginResult(JournalBeginStatus.AlreadyExists, same.Snapshot!);
+            }
+
+            if (unresolved.Count == 1)
+            {
+                return new JournalBeginResult(
+                    JournalBeginStatus.BlockedByUnresolvedExecution,
+                    unresolved[0].Snapshot);
             }
 
             string staging = ContainedPath($".{manifest.Fingerprint.Value}.{Guid.NewGuid():N}.staging");
@@ -367,6 +400,7 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
                     "*" + RecordSuffix,
                     SearchOption.TopDirectoryOnly)
                 .Select(Path.GetFileName)
+                .Order(StringComparer.Ordinal)
                 .FirstOrDefault(static name => !TryParseRecordFileName(name!, out _));
             if (malformedRecordName is not null)
             {
@@ -522,7 +556,8 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
 
     private IEnumerable<string> EnumerateExecutionDirectories() =>
         Directory.EnumerateDirectories(_root, "*", SearchOption.TopDirectoryOnly)
-            .Where(static path => !Path.GetFileName(path).StartsWith('.'));
+            .Where(static path => !Path.GetFileName(path).StartsWith('.'))
+            .OrderBy(static path => Path.GetFileName(path), StringComparer.Ordinal);
 
     private string ExecutionDirectory(PlanFingerprint fingerprint) =>
         ContainedPath(fingerprint.Value);
@@ -582,6 +617,7 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
                 File.Exists(path)
                 && !IsReparsePoint(path)
                 && IsValidTemporaryFileName(Path.GetFileName(path)))
+            .OrderBy(static path => Path.GetFileName(path), StringComparer.Ordinal)
             .Select(path => new JournalLoadProblem(
                 JournalLoadProblemKind.TemporaryFilePresent,
                 "An unpublished temporary journal file was ignored.",
@@ -593,7 +629,8 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
         foreach (string path in Directory.EnumerateFileSystemEntries(
                      directory,
                      "*",
-                     SearchOption.TopDirectoryOnly))
+                     SearchOption.TopDirectoryOnly)
+                 .OrderBy(static path => Path.GetFileName(path), StringComparer.Ordinal))
         {
             string fileName = Path.GetFileName(path);
             bool recognized = StringComparer.Ordinal.Equals(fileName, ManifestFileName)
@@ -619,6 +656,7 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
                 .Where(static path =>
                     !IsReparsePoint(path)
                     && IsValidStagingDirectoryName(Path.GetFileName(path)))
+                .OrderBy(static path => Path.GetFileName(path), StringComparer.Ordinal)
                 .Select(path => new JournalLoadProblem(
                     JournalLoadProblemKind.TemporaryFilePresent,
                     "An unpublished journal staging directory was ignored.",
@@ -636,7 +674,8 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
         foreach (string path in Directory.EnumerateFileSystemEntries(
                      _root,
                      "*",
-                     SearchOption.TopDirectoryOnly))
+                     SearchOption.TopDirectoryOnly)
+                 .OrderBy(static path => Path.GetFileName(path), StringComparer.Ordinal))
         {
             string name = Path.GetFileName(path);
             bool recognizedDirectory = Directory.Exists(path)
@@ -760,6 +799,76 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
         long? sequence = null,
         string? fileName = null) =>
         new(null, [new JournalLoadProblem(kind, description, sequence, fileName)]);
+
+    internal static ExecutionJournalReadResult MapForReplay(JournalLoadResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        ExecutionJournalReadProblem[] problems = result.Problems
+            .Select(static problem => new ExecutionJournalReadProblem(
+                MapProblemKind(problem.Kind),
+                problem.RecordSequence))
+            .ToArray();
+        ExecutionJournalReadStatus status = result.Status switch
+        {
+            JournalLoadStatus.NotFound => ExecutionJournalReadStatus.NotFound,
+            JournalLoadStatus.Loaded => ExecutionJournalReadStatus.Loaded,
+            JournalLoadStatus.Invalid => ExecutionJournalReadStatus.Invalid,
+            _ => throw new InvalidOperationException("The journal loader returned an unknown status."),
+        };
+
+        return new ExecutionJournalReadResult(status, result.Snapshot, problems);
+    }
+
+    private static JournalBeginResult InvalidBegin(
+        PlanFingerprint fingerprint,
+        JournalLoadResult result)
+    {
+        ExecutionJournalReadResult mapped = MapForReplay(result);
+        if (mapped.Status != ExecutionJournalReadStatus.Invalid)
+        {
+            throw new InvalidOperationException(
+                "Only an invalid durable journal can block begin without a trusted snapshot.");
+        }
+
+        return JournalBeginResult.InvalidExistingJournal(fingerprint, mapped.Problems);
+    }
+
+    private static ExecutionJournalReadProblemKind MapProblemKind(
+        JournalLoadProblemKind kind) => kind switch
+        {
+            JournalLoadProblemKind.MissingManifest =>
+                ExecutionJournalReadProblemKind.ManifestMissing,
+            JournalLoadProblemKind.MalformedManifest =>
+                ExecutionJournalReadProblemKind.ManifestMalformed,
+            JournalLoadProblemKind.UnsupportedJournalVersion =>
+                ExecutionJournalReadProblemKind.UnsupportedFormat,
+            JournalLoadProblemKind.WrongFingerprint =>
+                ExecutionJournalReadProblemKind.FingerprintOwnershipMismatch,
+            JournalLoadProblemKind.MalformedRecord =>
+                ExecutionJournalReadProblemKind.RecordMalformed,
+            JournalLoadProblemKind.DuplicateSequence
+                or JournalLoadProblemKind.SequenceGap
+                or JournalLoadProblemKind.RecordFileNameMismatch =>
+                    ExecutionJournalReadProblemKind.SequenceViolation,
+            JournalLoadProblemKind.PayloadHashMismatch =>
+                ExecutionJournalReadProblemKind.PayloadIntegrityViolation,
+            JournalLoadProblemKind.PreviousHashMismatch =>
+                ExecutionJournalReadProblemKind.HashChainViolation,
+            JournalLoadProblemKind.WrongRunOwnership =>
+                ExecutionJournalReadProblemKind.RunOwnershipMismatch,
+            JournalLoadProblemKind.RecordAfterTerminal =>
+                ExecutionJournalReadProblemKind.TerminalTail,
+            JournalLoadProblemKind.TemporaryFilePresent =>
+                ExecutionJournalReadProblemKind.TemporaryArtifactIgnored,
+            JournalLoadProblemKind.UnexpectedDurableEntry =>
+                ExecutionJournalReadProblemKind.UnexpectedStorageEntry,
+            JournalLoadProblemKind.UnsafeJournalPath =>
+                ExecutionJournalReadProblemKind.UnsafeStorage,
+            JournalLoadProblemKind.IoFailure =>
+                ExecutionJournalReadProblemKind.StorageReadFailure,
+            _ => throw new InvalidOperationException(
+                "The journal loader returned an unmapped validation problem."),
+        };
 
     private static void TryDeleteStagingDirectory(string path)
     {

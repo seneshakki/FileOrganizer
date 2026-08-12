@@ -35,10 +35,9 @@ public sealed class JournalBeginResult
     }
 
     private JournalBeginResult(
-        PlanFingerprint existingFingerprint,
+        PlanFingerprint? existingFingerprint,
         IEnumerable<ExecutionJournalReadProblem> problems)
     {
-        ArgumentNullException.ThrowIfNull(existingFingerprint);
         ArgumentNullException.ThrowIfNull(problems);
 
         ExecutionJournalReadProblem[] problemSnapshot = [.. problems];
@@ -71,7 +70,7 @@ public sealed class JournalBeginResult
     /// Gets the fingerprint of the trusted snapshot or invalid journal that
     /// prevented creation.
     /// </summary>
-    public PlanFingerprint ExistingFingerprint { get; }
+    public PlanFingerprint? ExistingFingerprint { get; }
 
     public IReadOnlyList<ExecutionJournalReadProblem> Problems => _problems;
 
@@ -79,4 +78,11 @@ public sealed class JournalBeginResult
         PlanFingerprint existingFingerprint,
         IEnumerable<ExecutionJournalReadProblem> problems) =>
         new(existingFingerprint, problems);
+
+    /// <summary>
+    /// Reports invalid global journal ownership that cannot safely be attributed
+    /// to one existing fingerprint.
+    /// </summary>
+    public static JournalBeginResult ConflictingExecutionOwnership(
+        IEnumerable<ExecutionJournalReadProblem> problems) => new(null, problems);
 }
