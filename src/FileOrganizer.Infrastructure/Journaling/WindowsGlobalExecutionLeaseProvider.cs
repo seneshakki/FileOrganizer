@@ -28,14 +28,27 @@ public sealed class WindowsGlobalExecutionLeaseProvider : IGlobalExecutionLeaseP
             return ValueTask.FromResult(GlobalExecutionLeaseAcquisition.Unsupported());
         }
 
-        var worker = new MutexOwnerWorker(timeout, cancellationToken);
+        MutexOwnerWorker? worker = null;
         try
         {
+            worker = new MutexOwnerWorker(timeout, cancellationToken);
             worker.Start();
+        }
+        catch (UnauthorizedAccessException)
+        {
+            worker?.DisposeBeforeStart();
+            return ValueTask.FromResult(GlobalExecutionLeaseAcquisition.Failed(
+                GlobalExecutionLeaseFailureKind.AccessDenied));
         }
         catch (ThreadStateException)
         {
-            worker.DisposeBeforeStart();
+            worker?.DisposeBeforeStart();
+            return ValueTask.FromResult(GlobalExecutionLeaseAcquisition.Failed(
+                GlobalExecutionLeaseFailureKind.SynchronizationFailure));
+        }
+        catch (Exception exception) when (IsSynchronizationFailure(exception))
+        {
+            worker?.DisposeBeforeStart();
             return ValueTask.FromResult(GlobalExecutionLeaseAcquisition.Failed(
                 GlobalExecutionLeaseFailureKind.SynchronizationFailure));
         }
@@ -52,6 +65,13 @@ public sealed class WindowsGlobalExecutionLeaseProvider : IGlobalExecutionLeaseP
                 "The execution lease timeout must be finite and non-negative.");
         }
     }
+
+    private static bool IsSynchronizationFailure(Exception exception) => exception is
+        IOException
+        or WaitHandleCannotBeOpenedException
+        or InvalidOperationException
+        or ObjectDisposedException
+        or ApplicationException;
 
     private enum WaitOutcome
     {
@@ -72,9 +92,7 @@ public sealed class WindowsGlobalExecutionLeaseProvider : IGlobalExecutionLeaseP
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _releaseCompletion =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private readonly EventWaitHandle _releaseSignal = new(
-            initialState: false,
-            EventResetMode.ManualReset);
+        private readonly EventWaitHandle _releaseSignal;
         private readonly long _startedTimestamp = Stopwatch.GetTimestamp();
         private readonly Thread _thread;
         private readonly TimeSpan _timeout;
@@ -91,6 +109,9 @@ public sealed class WindowsGlobalExecutionLeaseProvider : IGlobalExecutionLeaseP
                 IsBackground = true,
                 Name = "FileOrganizer execution lease owner",
             };
+            _releaseSignal = new EventWaitHandle(
+                initialState: false,
+                EventResetMode.ManualReset);
         }
 
         internal Task<GlobalExecutionLeaseAcquisition> AcquisitionTask => _acquisition.Task;
@@ -286,12 +307,6 @@ public sealed class WindowsGlobalExecutionLeaseProvider : IGlobalExecutionLeaseP
         private void CompleteFailure(GlobalExecutionLeaseFailureKind failureKind) =>
             _acquisition.TrySetResult(GlobalExecutionLeaseAcquisition.Failed(failureKind));
 
-        private static bool IsSynchronizationFailure(Exception exception) => exception is
-            IOException
-            or WaitHandleCannotBeOpenedException
-            or InvalidOperationException
-            or ObjectDisposedException
-            or ApplicationException;
     }
 
     private sealed class MutexLease : IGlobalExecutionLease

@@ -298,11 +298,16 @@ internal sealed class ScriptedPreflightPort : IExecutionPreflightPort
 
     internal int CallCount { get; private set; }
 
+    internal IGlobalExecutionLease? ExecutionLease { get; private set; }
+
     public ValueTask<ExecutionPreflightResult> InspectAsync(
+        IGlobalExecutionLease executionLease,
         ExecutionManifest manifest,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(executionLease);
         cancellationToken.ThrowIfCancellationRequested();
+        ExecutionLease = executionLease;
         CallCount++;
         ExecutionPreflightResult result = Handler?.Invoke(manifest, cancellationToken)
             ?? new ExecutionPreflightResult(
@@ -324,6 +329,10 @@ internal sealed class ScriptedMovePort : IMoveOperationPort, IRecoveryObservatio
 
     internal List<int> RecoveryObservedOrdinals { get; } = [];
 
+    internal List<IGlobalExecutionLease> AcquisitionExecutionLeases { get; } = [];
+
+    internal List<IGlobalExecutionLease> RecoveryExecutionLeases { get; } = [];
+
     internal ScriptedMoveStep this[int ordinal]
     {
         get
@@ -339,10 +348,13 @@ internal sealed class ScriptedMovePort : IMoveOperationPort, IRecoveryObservatio
     }
 
     public ValueTask<MoveLeaseAcquisition> TryAcquireAsync(
+        IGlobalExecutionLease executionLease,
         ExecutionManifestItem item,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(executionLease);
         cancellationToken.ThrowIfCancellationRequested();
+        AcquisitionExecutionLeases.Add(executionLease);
         AcquiredOrdinals.Add(item.Ordinal);
         ScriptedMoveStep step = this[item.Ordinal];
         return ValueTask.FromResult(
@@ -354,10 +366,13 @@ internal sealed class ScriptedMovePort : IMoveOperationPort, IRecoveryObservatio
     }
 
     public ValueTask<MoveObservation> ObserveAsync(
+        IGlobalExecutionLease executionLease,
         ExecutionManifestItem item,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(executionLease);
         cancellationToken.ThrowIfCancellationRequested();
+        RecoveryExecutionLeases.Add(executionLease);
         RecoveryObservedOrdinals.Add(item.Ordinal);
         ScriptedMoveStep step = this[item.Ordinal];
         MoveObservation observation = step.CurrentObservation;

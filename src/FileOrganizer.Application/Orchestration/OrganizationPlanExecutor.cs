@@ -120,6 +120,7 @@ public sealed class OrganizationPlanExecutor
             }
 
             ExecutionPreflightResult preflight = await _preflight.InspectAsync(
+                    executionLease,
                     manifest,
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -208,7 +209,10 @@ public sealed class OrganizationPlanExecutor
                 MoveLeaseAcquisition acquisition;
                 try
                 {
-                    acquisition = await _moves.TryAcquireAsync(item, cancellationToken)
+                    acquisition = await _moves.TryAcquireAsync(
+                            executionLease,
+                            item,
+                            cancellationToken)
                         .ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -496,6 +500,7 @@ public sealed class OrganizationPlanExecutor
             int ordinal = state.ActiveOperationOrdinal.Value;
             ExecutionManifestItem item = snapshot.Manifest.Items[ordinal];
             MoveObservation observation = await _recoveryObservations.ObserveAsync(
+                    executionLease,
                     item,
                     cancellationToken)
                 .ConfigureAwait(false);

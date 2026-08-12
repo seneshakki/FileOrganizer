@@ -27,6 +27,11 @@ public sealed class OrganizationPlanExecutorTests
             [ExecutionItemOutcome.Applied, ExecutionItemOutcome.Applied, ExecutionItemOutcome.Applied],
             result.Items.Select(item => item.Outcome));
         Assert.Equal([0, 1, 2], context.Moves.CommittedOrdinals);
+        Assert.Equal(3, context.Moves.AcquisitionExecutionLeases.Count);
+        Assert.All(
+            context.Moves.AcquisitionExecutionLeases,
+            lease => Assert.Same(context.Preflight.ExecutionLease, lease));
+        Assert.False(context.GlobalLease.IsOwned);
         Assert.Equal(
             [
                 ExecutionJournalRecordKind.ExecutionStarted,

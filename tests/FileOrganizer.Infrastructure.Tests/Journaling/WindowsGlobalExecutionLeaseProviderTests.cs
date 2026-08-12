@@ -123,6 +123,28 @@ public sealed class WindowsGlobalExecutionLeaseProviderTests
     }
 
     [Fact]
+    public async Task AcquireAsyncWhenNameBelongsToIncompatibleKernelObjectReturnsStructuredFailure()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows named kernel-object test.");
+
+        using var incompatibleObject = new EventWaitHandle(
+            initialState: false,
+            EventResetMode.ManualReset,
+            WindowsGlobalExecutionLeaseProvider.MutexName);
+        var provider = new WindowsGlobalExecutionLeaseProvider();
+
+        GlobalExecutionLeaseAcquisition result = await provider.AcquireAsync(
+            TimeSpan.Zero,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(GlobalExecutionLeaseAcquisitionStatus.Failed, result.Status);
+        Assert.Equal(
+            GlobalExecutionLeaseFailureKind.SynchronizationFailure,
+            result.FailureKind);
+        Assert.Null(result.Lease);
+    }
+
+    [Fact]
     public async Task AcquireAsyncPreCanceledThrowsOperationCanceledException()
     {
         var provider = new WindowsGlobalExecutionLeaseProvider();

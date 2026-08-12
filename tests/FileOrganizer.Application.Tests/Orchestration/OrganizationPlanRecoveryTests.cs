@@ -46,6 +46,8 @@ public sealed class OrganizationPlanRecoveryTests
         Assert.Equal(0, result.NextOperationOrdinal);
         Assert.True(result.JournalWasUpdated);
         Assert.Equal([0], context.Moves.RecoveryObservedOrdinals);
+        Assert.Single(context.Moves.RecoveryExecutionLeases);
+        Assert.False(context.GlobalLease.IsOwned);
         Assert.Single(context.Moves.CommittedOrdinals);
         ExecutionJournalRecord last = context.Journal.Records(fingerprint)[^1];
         Assert.Equal(ExecutionJournalRecordKind.MoveNotApplied, last.Kind);
