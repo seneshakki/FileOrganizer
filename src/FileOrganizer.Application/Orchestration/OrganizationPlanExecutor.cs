@@ -136,8 +136,10 @@ public sealed class OrganizationPlanExecutor
 
             cancellationToken.ThrowIfCancellationRequested();
 
+            ExecutionRunId runId = ExecutionRunId.CreateNew();
             DateTimeOffset lastJournalTime = UtcNow();
             ExecutionJournalRecord startRecord = ExecutionJournalRecord.ExecutionStarted(
+                runId,
                 manifest.Fingerprint,
                 sequence: 0,
                 lastJournalTime);
@@ -180,6 +182,7 @@ public sealed class OrganizationPlanExecutor
                 {
                     return await InterruptAfterStartAsync(
                             manifest,
+                            runId,
                             attemptStartedAt,
                             results,
                             nextSequence,
@@ -198,6 +201,7 @@ public sealed class OrganizationPlanExecutor
                 {
                     return await InterruptAfterStartAsync(
                             manifest,
+                            runId,
                             attemptStartedAt,
                             results,
                             nextSequence,
@@ -214,6 +218,7 @@ public sealed class OrganizationPlanExecutor
 
                     return await InterruptAfterStartAsync(
                             manifest,
+                            runId,
                             attemptStartedAt,
                             results,
                             nextSequence,
@@ -226,6 +231,7 @@ public sealed class OrganizationPlanExecutor
                     ValidateOperationProblem(item, acquisition.Problem!);
                     JournalRecordReasonKind reason = ToPreIntentStopReason(acquisition);
                     ExecutionJournalRecord stop = ExecutionJournalRecord.ExecutionStopped(
+                        runId,
                         manifest.Fingerprint,
                         nextSequence,
                         NextJournalTime(ref lastJournalTime),
@@ -262,6 +268,7 @@ public sealed class OrganizationPlanExecutor
                                 ? JournalRecordReasonKind.SourceRevalidationFailed
                                 : JournalRecordReasonKind.DestinationRevalidationFailed;
                         ExecutionJournalRecord stop = ExecutionJournalRecord.ExecutionStopped(
+                            runId,
                             manifest.Fingerprint,
                             nextSequence,
                             NextJournalTime(ref lastJournalTime),
@@ -283,6 +290,7 @@ public sealed class OrganizationPlanExecutor
                     PhysicalEntryIdentity expectedSourceIdentity =
                         item.SourcePrecondition.PhysicalIdentity!;
                     ExecutionJournalRecord intent = ExecutionJournalRecord.MoveIntent(
+                        runId,
                         manifest.Fingerprint,
                         nextSequence++,
                         NextJournalTime(ref lastJournalTime),
@@ -303,6 +311,7 @@ public sealed class OrganizationPlanExecutor
                         observation.Source,
                         observation.Target);
                     ExecutionJournalRecord outcomeRecord = CreateMoveOutcomeRecord(
+                        runId,
                         manifest.Fingerprint,
                         nextSequence++,
                         NextJournalTime(ref lastJournalTime),
@@ -354,6 +363,7 @@ public sealed class OrganizationPlanExecutor
             }
 
             ExecutionJournalRecord completed = ExecutionJournalRecord.ExecutionCompleted(
+                runId,
                 manifest.Fingerprint,
                 nextSequence,
                 NextJournalTime(ref lastJournalTime));
@@ -469,6 +479,7 @@ public sealed class OrganizationPlanExecutor
 
             DateTimeOffset lastJournalTime = LastJournalTime(snapshot);
             RecoveryDecision decision = MoveRecoveryStateMachine.Decide(
+                snapshot.RunId,
                 state,
                 observation.Source,
                 observation.Target,
@@ -508,6 +519,7 @@ public sealed class OrganizationPlanExecutor
                 cancellationToken.ThrowIfCancellationRequested();
                 DateTimeOffset lastJournalTime = LastJournalTime(snapshot);
                 ExecutionJournalRecord completed = ExecutionJournalRecord.ExecutionCompleted(
+                    snapshot.RunId,
                     manifest.Fingerprint,
                     state.NextSequence,
                     NextJournalTime(ref lastJournalTime));
@@ -813,12 +825,14 @@ public sealed class OrganizationPlanExecutor
 
     private async ValueTask<ExecutionResult> InterruptAfterStartAsync(
         ExecutionManifest manifest,
+        ExecutionRunId runId,
         DateTimeOffset attemptStartedAt,
         ExecutionItemResult[] results,
         long nextSequence,
         DateTimeOffset lastJournalTime)
     {
         ExecutionJournalRecord interrupted = ExecutionJournalRecord.ExecutionInterrupted(
+            runId,
             manifest.Fingerprint,
             nextSequence,
             NextJournalTime(ref lastJournalTime),
@@ -926,6 +940,7 @@ public sealed class OrganizationPlanExecutor
     }
 
     private static ExecutionJournalRecord CreateMoveOutcomeRecord(
+        ExecutionRunId runId,
         PlanFingerprint fingerprint,
         long sequence,
         DateTimeOffset recordedAtUtc,
@@ -933,17 +948,20 @@ public sealed class OrganizationPlanExecutor
         RecoveryResolution resolution) => resolution.Disposition switch
         {
             RecoveryDisposition.Applied => ExecutionJournalRecord.MoveApplied(
+                runId,
                 fingerprint,
                 sequence,
                 recordedAtUtc,
                 ordinal),
             RecoveryDisposition.NotApplied => ExecutionJournalRecord.MoveNotApplied(
+                runId,
                 fingerprint,
                 sequence,
                 recordedAtUtc,
                 ordinal,
                 JournalRecordReasonKind.MoveDidNotApply),
             RecoveryDisposition.Conflict => ExecutionJournalRecord.MoveConflict(
+                runId,
                 fingerprint,
                 sequence,
                 recordedAtUtc,
@@ -952,12 +970,14 @@ public sealed class OrganizationPlanExecutor
                     ? JournalRecordReasonKind.RecoverySourceIdentityChanged
                     : JournalRecordReasonKind.DestinationConflict),
             RecoveryDisposition.Ambiguous => ExecutionJournalRecord.MoveAmbiguous(
+                runId,
                 fingerprint,
                 sequence,
                 recordedAtUtc,
                 ordinal,
                 JournalRecordReasonKind.MoveOutcomeUnknown),
             RecoveryDisposition.ManualRecovery => ExecutionJournalRecord.MoveManualRecovery(
+                runId,
                 fingerprint,
                 sequence,
                 recordedAtUtc,

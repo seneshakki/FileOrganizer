@@ -10,6 +10,7 @@ namespace FileOrganizer.Application.Journaling;
 public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
 {
     private ExecutionJournalRecord(
+        ExecutionRunId runId,
         PlanFingerprint fingerprint,
         long sequence,
         DateTimeOffset recordedAtUtc,
@@ -18,6 +19,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
         PhysicalEntryIdentity? expectedEntryIdentity,
         JournalRecordReasonKind reason)
     {
+        ArgumentNullException.ThrowIfNull(runId);
         ArgumentNullException.ThrowIfNull(fingerprint);
 
         ArgumentOutOfRangeException.ThrowIfNegative(sequence);
@@ -89,6 +91,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
                 nameof(reason));
         }
 
+        RunId = runId;
         Fingerprint = fingerprint;
         Sequence = sequence;
         RecordedAtUtc = recordedAtUtc.ToUniversalTime();
@@ -97,6 +100,8 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
         ExpectedEntryIdentity = expectedEntryIdentity;
         Reason = reason;
     }
+
+    public ExecutionRunId RunId { get; }
 
     public PlanFingerprint Fingerprint { get; }
 
@@ -117,10 +122,12 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
     public JournalRecordReasonKind Reason { get; }
 
     public static ExecutionJournalRecord ExecutionStarted(
+        ExecutionRunId runId,
         PlanFingerprint fingerprint,
         long sequence,
         DateTimeOffset recordedAtUtc) =>
         new(
+            runId,
             fingerprint,
             sequence,
             recordedAtUtc,
@@ -130,12 +137,14 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
             JournalRecordReasonKind.None);
 
     public static ExecutionJournalRecord MoveIntent(
+        ExecutionRunId runId,
         PlanFingerprint fingerprint,
         long sequence,
         DateTimeOffset recordedAtUtc,
         int operationOrdinal,
         PhysicalEntryIdentity expectedEntryIdentity) =>
         new(
+            runId,
             fingerprint,
             sequence,
             recordedAtUtc,
@@ -145,6 +154,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
             JournalRecordReasonKind.None);
 
     public static ExecutionJournalRecord MoveApplied(
+        ExecutionRunId runId,
         PlanFingerprint fingerprint,
         long sequence,
         DateTimeOffset recordedAtUtc,
@@ -157,6 +167,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
             JournalRecordReasonKind.None,
             JournalRecordReasonKind.RecoveryConfirmedApplied);
         return new(
+            runId,
             fingerprint,
             sequence,
             recordedAtUtc,
@@ -167,6 +178,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
     }
 
     public static ExecutionJournalRecord MoveNotApplied(
+        ExecutionRunId runId,
         PlanFingerprint fingerprint,
         long sequence,
         DateTimeOffset recordedAtUtc,
@@ -179,6 +191,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
             JournalRecordReasonKind.MoveDidNotApply,
             JournalRecordReasonKind.RecoveryConfirmedNotApplied);
         return new(
+            runId,
             fingerprint,
             sequence,
             recordedAtUtc,
@@ -189,6 +202,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
     }
 
     public static ExecutionJournalRecord MoveConflict(
+        ExecutionRunId runId,
         PlanFingerprint fingerprint,
         long sequence,
         DateTimeOffset recordedAtUtc,
@@ -202,6 +216,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
             JournalRecordReasonKind.RecoverySourceIdentityChanged,
             JournalRecordReasonKind.RecoveryTargetIdentityChanged);
         return new(
+            runId,
             fingerprint,
             sequence,
             recordedAtUtc,
@@ -212,6 +227,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
     }
 
     public static ExecutionJournalRecord MoveAmbiguous(
+        ExecutionRunId runId,
         PlanFingerprint fingerprint,
         long sequence,
         DateTimeOffset recordedAtUtc,
@@ -225,6 +241,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
             JournalRecordReasonKind.RecoveryBothPathsContainExpectedEntry,
             JournalRecordReasonKind.RecoveryBothPathsMissing);
         return new(
+            runId,
             fingerprint,
             sequence,
             recordedAtUtc,
@@ -235,6 +252,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
     }
 
     public static ExecutionJournalRecord MoveManualRecovery(
+        ExecutionRunId runId,
         PlanFingerprint fingerprint,
         long sequence,
         DateTimeOffset recordedAtUtc,
@@ -246,6 +264,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
             nameof(reason),
             JournalRecordReasonKind.RecoveryInspectionFailed);
         return new(
+            runId,
             fingerprint,
             sequence,
             recordedAtUtc,
@@ -260,6 +279,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
     /// attempted for this operation.
     /// </summary>
     public static ExecutionJournalRecord ExecutionStopped(
+        ExecutionRunId runId,
         PlanFingerprint fingerprint,
         long sequence,
         DateTimeOffset recordedAtUtc,
@@ -277,6 +297,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
         }
 
         return new(
+            runId,
             fingerprint,
             sequence,
             recordedAtUtc,
@@ -287,6 +308,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
     }
 
     public static ExecutionJournalRecord ExecutionInterrupted(
+        ExecutionRunId runId,
         PlanFingerprint fingerprint,
         long sequence,
         DateTimeOffset recordedAtUtc,
@@ -298,6 +320,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
             JournalRecordReasonKind.CancellationRequested,
             JournalRecordReasonKind.ExecutionFault);
         return new(
+            runId,
             fingerprint,
             sequence,
             recordedAtUtc,
@@ -312,10 +335,12 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
     /// to have applied or after cancellation at a safe boundary.
     /// </summary>
     public static ExecutionJournalRecord ExecutionResumed(
+        ExecutionRunId runId,
         PlanFingerprint fingerprint,
         long sequence,
         DateTimeOffset recordedAtUtc) =>
         new(
+            runId,
             fingerprint,
             sequence,
             recordedAtUtc,
@@ -325,10 +350,12 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
             JournalRecordReasonKind.None);
 
     public static ExecutionJournalRecord ExecutionCompleted(
+        ExecutionRunId runId,
         PlanFingerprint fingerprint,
         long sequence,
         DateTimeOffset recordedAtUtc) =>
         new(
+            runId,
             fingerprint,
             sequence,
             recordedAtUtc,
@@ -337,8 +364,28 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
             null,
             JournalRecordReasonKind.None);
 
+    internal static ExecutionJournalRecord Restore(
+        ExecutionRunId runId,
+        PlanFingerprint fingerprint,
+        long sequence,
+        DateTimeOffset recordedAtUtc,
+        ExecutionJournalRecordKind kind,
+        int? operationOrdinal,
+        PhysicalEntryIdentity? expectedEntryIdentity,
+        JournalRecordReasonKind reason) =>
+        new(
+            runId,
+            fingerprint,
+            sequence,
+            recordedAtUtc,
+            kind,
+            operationOrdinal,
+            expectedEntryIdentity,
+            reason);
+
     public bool Equals(ExecutionJournalRecord? other) =>
         other is not null
+        && RunId.Equals(other.RunId)
         && Fingerprint.Equals(other.Fingerprint)
         && Sequence == other.Sequence
         && RecordedAtUtc == other.RecordedAtUtc
@@ -352,6 +399,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
     public override int GetHashCode()
     {
         HashCode hash = new();
+        hash.Add(RunId);
         hash.Add(Fingerprint);
         hash.Add(Sequence);
         hash.Add(RecordedAtUtc);

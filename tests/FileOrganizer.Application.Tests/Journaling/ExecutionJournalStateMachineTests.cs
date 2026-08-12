@@ -25,6 +25,7 @@ public sealed class ExecutionJournalStateMachineTests
             Intent(manifest, 3, 1),
             Applied(manifest, 4, 1),
             ExecutionJournalRecord.ExecutionCompleted(
+                TestExecutionRuns.Id,
                 manifest.Fingerprint,
                 5,
                 At(5)),
@@ -75,7 +76,7 @@ public sealed class ExecutionJournalStateMachineTests
     public void ExistingDurableSnapshotCannotOmitItsAtomicStartRecord()
     {
         ExecutionManifest manifest = JournalTestManifest.Create();
-        ExecutionJournalSnapshot invalidSnapshot = new(manifest, []);
+        ExecutionJournalSnapshot invalidSnapshot = new(TestExecutionRuns.Id, manifest, []);
 
         InvalidJournalSequenceException exception =
             Assert.Throws<InvalidJournalSequenceException>(
@@ -88,7 +89,10 @@ public sealed class ExecutionJournalStateMachineTests
     public void SnapshotReplayUsesOnlyTheManifestStoredInThatSnapshot()
     {
         ExecutionManifest manifest = JournalTestManifest.Create();
-        ExecutionJournalSnapshot snapshot = new(manifest, [Start(manifest, 0)]);
+        ExecutionJournalSnapshot snapshot = new(
+            TestExecutionRuns.Id,
+            manifest,
+            [Start(manifest, 0)]);
 
         ExecutionJournalState state = ExecutionJournalStateMachine.Replay(snapshot);
 
@@ -152,6 +156,7 @@ public sealed class ExecutionJournalStateMachineTests
     {
         ExecutionManifest manifest = JournalTestManifest.Create();
         ExecutionJournalRecord stopped = ExecutionJournalRecord.ExecutionStopped(
+            TestExecutionRuns.Id,
             manifest.Fingerprint,
             1,
             At(1),
@@ -175,17 +180,42 @@ public sealed class ExecutionJournalStateMachineTests
         InvalidJournalSequenceException gap = Assert.Throws<InvalidJournalSequenceException>(
             () => ExecutionJournalStateMachine.Replay(
                 manifest,
-                [ExecutionJournalRecord.ExecutionStarted(manifest.Fingerprint, 1, At(0))]));
+                [ExecutionJournalRecord.ExecutionStarted(
+                    TestExecutionRuns.Id,
+                    manifest.Fingerprint,
+                    1,
+                    At(0))]));
         InvalidJournalSequenceException mismatch = Assert.Throws<InvalidJournalSequenceException>(
             () => ExecutionJournalStateMachine.Replay(
                 manifest,
                 [ExecutionJournalRecord.ExecutionStarted(
+                    TestExecutionRuns.Id,
                     new PlanFingerprint(new string('f', 64)),
                     0,
                     At(0))]));
 
         Assert.Equal(JournalSequenceProblemKind.SequenceGap, gap.ProblemKind);
         Assert.Equal(JournalSequenceProblemKind.FingerprintMismatch, mismatch.ProblemKind);
+    }
+
+    [Fact]
+    public void RejectsMixedRunOwnershipInTheEnumerableReplayOverload()
+    {
+        ExecutionManifest manifest = JournalTestManifest.Create();
+        ExecutionJournalRecord intent = ExecutionJournalRecord.MoveIntent(
+            new ExecutionRunId("11111111111111111111111111111111"),
+            manifest.Fingerprint,
+            1,
+            At(1),
+            0,
+            manifest.Items[0].SourcePrecondition.PhysicalIdentity!);
+
+        InvalidJournalSequenceException exception = Assert.Throws<InvalidJournalSequenceException>(
+            () => ExecutionJournalStateMachine.Replay(
+                manifest,
+                [Start(manifest, 0), intent]));
+
+        Assert.Equal(JournalSequenceProblemKind.RunMismatch, exception.ProblemKind);
     }
 
     [Fact]
@@ -214,7 +244,11 @@ public sealed class ExecutionJournalStateMachineTests
                 manifest,
                 [
                     Start(manifest, 0),
-                    ExecutionJournalRecord.ExecutionCompleted(manifest.Fingerprint, 1, At(1)),
+                    ExecutionJournalRecord.ExecutionCompleted(
+                        TestExecutionRuns.Id,
+                        manifest.Fingerprint,
+                        1,
+                        At(1)),
                 ]));
         InvalidJournalSequenceException tail = Assert.Throws<InvalidJournalSequenceException>(
             () => ExecutionJournalStateMachine.Replay(
@@ -222,6 +256,7 @@ public sealed class ExecutionJournalStateMachineTests
                 [
                     Start(manifest, 0),
                     ExecutionJournalRecord.ExecutionInterrupted(
+                        TestExecutionRuns.Id,
                         manifest.Fingerprint,
                         1,
                         At(1),
@@ -242,6 +277,7 @@ public sealed class ExecutionJournalStateMachineTests
             [
                 Start(manifest, 0),
                 ExecutionJournalRecord.MoveIntent(
+                    TestExecutionRuns.Id,
                     manifest.Fingerprint,
                     1,
                     StartedAt.AddSeconds(-1),
@@ -255,6 +291,7 @@ public sealed class ExecutionJournalStateMachineTests
                     Start(manifest, 0),
                     Intent(manifest, 1, 0),
                     ExecutionJournalRecord.ExecutionInterrupted(
+                        TestExecutionRuns.Id,
                         manifest.Fingerprint,
                         2,
                         At(2),
@@ -270,6 +307,7 @@ public sealed class ExecutionJournalStateMachineTests
     {
         ExecutionManifest manifest = JournalTestManifest.Create();
         ExecutionJournalRecord notApplied = ExecutionJournalRecord.MoveNotApplied(
+            TestExecutionRuns.Id,
             manifest.Fingerprint,
             2,
             At(2),
@@ -289,7 +327,11 @@ public sealed class ExecutionJournalStateMachineTests
                 Start(manifest, 0),
                 Intent(manifest, 1, 0),
                 notApplied,
-                ExecutionJournalRecord.ExecutionResumed(manifest.Fingerprint, 3, At(3)),
+                ExecutionJournalRecord.ExecutionResumed(
+                    TestExecutionRuns.Id,
+                    manifest.Fingerprint,
+                    3,
+                    At(3)),
                 retryAfterResume,
             ]);
 
@@ -303,6 +345,7 @@ public sealed class ExecutionJournalStateMachineTests
     {
         ExecutionManifest manifest = JournalTestManifest.Create(operationCount: 2);
         ExecutionJournalRecord recoveredApplied = ExecutionJournalRecord.MoveApplied(
+            TestExecutionRuns.Id,
             manifest.Fingerprint,
             2,
             At(2),
@@ -329,7 +372,11 @@ public sealed class ExecutionJournalStateMachineTests
                 Start(manifest, 0),
                 Intent(manifest, 1, 0),
                 recoveredApplied,
-                ExecutionJournalRecord.ExecutionResumed(manifest.Fingerprint, 3, At(3)),
+                ExecutionJournalRecord.ExecutionResumed(
+                    TestExecutionRuns.Id,
+                    manifest.Fingerprint,
+                    3,
+                    At(3)),
                 Intent(manifest, 4, 1),
             ]);
 
@@ -345,13 +392,18 @@ public sealed class ExecutionJournalStateMachineTests
     {
         ExecutionManifest manifest = JournalTestManifest.Create();
         ExecutionJournalRecord recoveredApplied = ExecutionJournalRecord.MoveApplied(
+            TestExecutionRuns.Id,
             manifest.Fingerprint,
             2,
             At(2),
             0,
             JournalRecordReasonKind.RecoveryConfirmedApplied);
         ExecutionJournalRecord completionWithoutResume =
-            ExecutionJournalRecord.ExecutionCompleted(manifest.Fingerprint, 3, At(3));
+            ExecutionJournalRecord.ExecutionCompleted(
+                TestExecutionRuns.Id,
+                manifest.Fingerprint,
+                3,
+                At(3));
 
         InvalidJournalSequenceException exception =
             Assert.Throws<InvalidJournalSequenceException>(
@@ -369,8 +421,16 @@ public sealed class ExecutionJournalStateMachineTests
                 Start(manifest, 0),
                 Intent(manifest, 1, 0),
                 recoveredApplied,
-                ExecutionJournalRecord.ExecutionResumed(manifest.Fingerprint, 3, At(3)),
-                ExecutionJournalRecord.ExecutionCompleted(manifest.Fingerprint, 4, At(4)),
+                ExecutionJournalRecord.ExecutionResumed(
+                    TestExecutionRuns.Id,
+                    manifest.Fingerprint,
+                    3,
+                    At(3)),
+                ExecutionJournalRecord.ExecutionCompleted(
+                    TestExecutionRuns.Id,
+                    manifest.Fingerprint,
+                    4,
+                    At(4)),
             ]);
 
         Assert.Equal(JournalSequenceProblemKind.ResumeRequired, exception.ProblemKind);
@@ -396,6 +456,7 @@ public sealed class ExecutionJournalStateMachineTests
                 start,
                 intent,
                 ExecutionJournalRecord.MoveNotApplied(
+                    TestExecutionRuns.Id,
                     manifest.Fingerprint,
                     2,
                     At(2),
@@ -408,6 +469,7 @@ public sealed class ExecutionJournalStateMachineTests
                 start,
                 intent,
                 ExecutionJournalRecord.MoveManualRecovery(
+                    TestExecutionRuns.Id,
                     manifest.Fingerprint,
                     2,
                     At(2),
@@ -419,6 +481,7 @@ public sealed class ExecutionJournalStateMachineTests
             [
                 start,
                 ExecutionJournalRecord.ExecutionStopped(
+                    TestExecutionRuns.Id,
                     manifest.Fingerprint,
                     1,
                     At(1),
@@ -430,6 +493,7 @@ public sealed class ExecutionJournalStateMachineTests
             [
                 start,
                 ExecutionJournalRecord.ExecutionStopped(
+                    TestExecutionRuns.Id,
                     manifest.Fingerprint,
                     1,
                     At(1),
@@ -441,6 +505,7 @@ public sealed class ExecutionJournalStateMachineTests
             [
                 start,
                 ExecutionJournalRecord.ExecutionInterrupted(
+                    TestExecutionRuns.Id,
                     manifest.Fingerprint,
                     1,
                     At(1),
@@ -453,6 +518,7 @@ public sealed class ExecutionJournalStateMachineTests
                 intent,
                 Applied(manifest, 2, 0),
                 ExecutionJournalRecord.ExecutionCompleted(
+                    TestExecutionRuns.Id,
                     manifest.Fingerprint,
                     3,
                     At(3)),
@@ -470,13 +536,18 @@ public sealed class ExecutionJournalStateMachineTests
     }
 
     private static ExecutionJournalRecord Start(ExecutionManifest manifest, long sequence) =>
-        ExecutionJournalRecord.ExecutionStarted(manifest.Fingerprint, sequence, At(sequence));
+        ExecutionJournalRecord.ExecutionStarted(
+            TestExecutionRuns.Id,
+            manifest.Fingerprint,
+            sequence,
+            At(sequence));
 
     private static ExecutionJournalRecord Intent(
         ExecutionManifest manifest,
         long sequence,
         int ordinal) =>
         ExecutionJournalRecord.MoveIntent(
+            TestExecutionRuns.Id,
             manifest.Fingerprint,
             sequence,
             At(sequence),
@@ -487,7 +558,12 @@ public sealed class ExecutionJournalStateMachineTests
         ExecutionManifest manifest,
         long sequence,
         int ordinal) =>
-        ExecutionJournalRecord.MoveApplied(manifest.Fingerprint, sequence, At(sequence), ordinal);
+        ExecutionJournalRecord.MoveApplied(
+            TestExecutionRuns.Id,
+            manifest.Fingerprint,
+            sequence,
+            At(sequence),
+            ordinal);
 
     private static ExecutionJournalRecord Outcome(
         ExecutionManifest manifest,
@@ -495,24 +571,28 @@ public sealed class ExecutionJournalStateMachineTests
         kind switch
         {
             ExecutionJournalRecordKind.MoveNotApplied => ExecutionJournalRecord.MoveNotApplied(
+                TestExecutionRuns.Id,
                 manifest.Fingerprint,
                 2,
                 At(2),
                 0,
                 JournalRecordReasonKind.MoveDidNotApply),
             ExecutionJournalRecordKind.MoveConflict => ExecutionJournalRecord.MoveConflict(
+                TestExecutionRuns.Id,
                 manifest.Fingerprint,
                 2,
                 At(2),
                 0,
                 JournalRecordReasonKind.DestinationConflict),
             ExecutionJournalRecordKind.MoveAmbiguous => ExecutionJournalRecord.MoveAmbiguous(
+                TestExecutionRuns.Id,
                 manifest.Fingerprint,
                 2,
                 At(2),
                 0,
                 JournalRecordReasonKind.RecoveryBothPathsMissing),
             ExecutionJournalRecordKind.MoveManualRecovery => ExecutionJournalRecord.MoveManualRecovery(
+                TestExecutionRuns.Id,
                 manifest.Fingerprint,
                 2,
                 At(2),

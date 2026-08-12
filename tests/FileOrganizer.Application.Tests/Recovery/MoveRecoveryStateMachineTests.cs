@@ -103,6 +103,7 @@ public sealed class MoveRecoveryStateMachineTests
             ObservationsFor(disposition);
 
         RecoveryDecision decision = MoveRecoveryStateMachine.Decide(
+            TestExecutionRuns.Id,
             pending,
             source,
             target,
@@ -124,6 +125,7 @@ public sealed class MoveRecoveryStateMachineTests
         RecoveryEntryObservation missing = RecoveryEntryObservation.Missing();
         RecoveryEntryObservation found = RecoveryEntryObservation.Present(Expected);
         RecoveryDecision first = MoveRecoveryStateMachine.Decide(
+            TestExecutionRuns.Id,
             pending,
             missing,
             found,
@@ -132,8 +134,9 @@ public sealed class MoveRecoveryStateMachineTests
         ExecutionJournalState replayed = ExecutionJournalStateMachine.Replay(
             manifest,
             [
-                ExecutionJournalRecord.ExecutionStarted(manifest.Fingerprint, 0, StartedAt),
+                ExecutionJournalRecord.ExecutionStarted(TestExecutionRuns.Id, manifest.Fingerprint, 0, StartedAt),
                 ExecutionJournalRecord.MoveIntent(
+                    TestExecutionRuns.Id,
                     manifest.Fingerprint,
                     1,
                     StartedAt.AddSeconds(1),
@@ -143,6 +146,7 @@ public sealed class MoveRecoveryStateMachineTests
             ]);
 
         RecoveryDecision repeated = MoveRecoveryStateMachine.Decide(
+            TestExecutionRuns.Id,
             replayed,
             missing,
             found,
@@ -160,6 +164,7 @@ public sealed class MoveRecoveryStateMachineTests
     {
         ExecutionManifest manifest = JournalTestManifest.Create();
         RecoveryDecision decision = MoveRecoveryStateMachine.Decide(
+            TestExecutionRuns.Id,
             Pending(manifest),
             RecoveryEntryObservation.Present(Expected),
             RecoveryEntryObservation.Missing(),
@@ -167,8 +172,9 @@ public sealed class MoveRecoveryStateMachineTests
         ExecutionJournalState reconciled = ExecutionJournalStateMachine.Replay(
             manifest,
             [
-                ExecutionJournalRecord.ExecutionStarted(manifest.Fingerprint, 0, StartedAt),
+                ExecutionJournalRecord.ExecutionStarted(TestExecutionRuns.Id, manifest.Fingerprint, 0, StartedAt),
                 ExecutionJournalRecord.MoveIntent(
+                    TestExecutionRuns.Id,
                     manifest.Fingerprint,
                     1,
                     StartedAt.AddSeconds(1),
@@ -209,8 +215,9 @@ public sealed class MoveRecoveryStateMachineTests
         ExecutionJournalStateMachine.Replay(
             manifest,
             [
-                ExecutionJournalRecord.ExecutionStarted(manifest.Fingerprint, 0, StartedAt),
+                ExecutionJournalRecord.ExecutionStarted(TestExecutionRuns.Id, manifest.Fingerprint, 0, StartedAt),
                 ExecutionJournalRecord.MoveIntent(
+                    TestExecutionRuns.Id,
                     manifest.Fingerprint,
                     1,
                     StartedAt.AddSeconds(1),

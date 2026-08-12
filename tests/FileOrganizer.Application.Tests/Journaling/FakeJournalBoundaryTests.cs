@@ -6,6 +6,9 @@ namespace FileOrganizer.Application.Tests.Journaling;
 
 public sealed class FakeJournalBoundaryTests
 {
+    private static readonly ExecutionRunId RunId =
+        new("0123456789abcdef0123456789abcdef");
+
     private static readonly DateTimeOffset StartedAt =
         new(2026, 8, 9, 10, 0, 0, TimeSpan.Zero);
 
@@ -14,6 +17,7 @@ public sealed class FakeJournalBoundaryTests
     {
         ExecutionManifest manifest = JournalTestManifest.Create();
         ExecutionJournalRecord start = ExecutionJournalRecord.ExecutionStarted(
+            RunId,
             manifest.Fingerprint,
             0,
             StartedAt);
@@ -36,12 +40,14 @@ public sealed class FakeJournalBoundaryTests
         ExecutionManifest manifest = JournalTestManifest.Create();
         FakeExecutionJournalStore store = new();
         ExecutionJournalRecord start = ExecutionJournalRecord.ExecutionStarted(
+            RunId,
             manifest.Fingerprint,
             0,
             StartedAt);
         CancellationToken cancellationToken = TestContext.Current.CancellationToken;
         await store.BeginAsync(manifest, start, cancellationToken);
         ExecutionJournalRecord intent = ExecutionJournalRecord.MoveIntent(
+            RunId,
             manifest.Fingerprint,
             1,
             StartedAt.AddSeconds(1),
@@ -52,6 +58,7 @@ public sealed class FakeJournalBoundaryTests
         JournalPublishResult repeated = await store.PublishAsync(intent, cancellationToken);
         JournalPublishResult conflicting = await store.PublishAsync(
             ExecutionJournalRecord.ExecutionInterrupted(
+                RunId,
                 manifest.Fingerprint,
                 1,
                 StartedAt.AddSeconds(1),
@@ -59,6 +66,7 @@ public sealed class FakeJournalBoundaryTests
             cancellationToken);
         JournalPublishResult gap = await store.PublishAsync(
             ExecutionJournalRecord.MoveApplied(
+                RunId,
                 manifest.Fingerprint,
                 3,
                 StartedAt.AddSeconds(3),
@@ -142,6 +150,7 @@ public sealed class FakeJournalBoundaryTests
         CancellationToken cancellationToken) => store.BeginAsync(
             manifest,
             ExecutionJournalRecord.ExecutionStarted(
+                RunId,
                 manifest.Fingerprint,
                 0,
                 StartedAt),
@@ -157,6 +166,7 @@ public sealed class FakeJournalBoundaryTests
         {
             JournalPublishResult intent = await store.PublishAsync(
                 ExecutionJournalRecord.MoveIntent(
+                    RunId,
                     manifest.Fingerprint,
                     sequence,
                     StartedAt.AddSeconds(sequence),
@@ -171,6 +181,7 @@ public sealed class FakeJournalBoundaryTests
 
             JournalPublishResult applied = await store.PublishAsync(
                 ExecutionJournalRecord.MoveApplied(
+                    RunId,
                     manifest.Fingerprint,
                     sequence,
                     StartedAt.AddSeconds(sequence),
@@ -182,6 +193,7 @@ public sealed class FakeJournalBoundaryTests
 
         JournalPublishResult completed = await store.PublishAsync(
             ExecutionJournalRecord.ExecutionCompleted(
+                RunId,
                 manifest.Fingerprint,
                 sequence,
                 StartedAt.AddSeconds(sequence)),
@@ -246,7 +258,7 @@ public sealed class FakeJournalBoundaryTests
                             unresolved.Snapshot()));
                 }
 
-                JournalData created = new(manifest, [startRecord]);
+                JournalData created = new(startRecord.RunId, manifest, [startRecord]);
                 _journals.Add(manifest.Fingerprint, created);
                 return ValueTask.FromResult(
                     new JournalBeginResult(JournalBeginStatus.Begun, created.Snapshot()));
@@ -263,6 +275,11 @@ public sealed class FakeJournalBoundaryTests
             lock (_gate)
             {
                 if (!_journals.TryGetValue(record.Fingerprint, out JournalData? journal))
+                {
+                    return ValueTask.FromResult(JournalPublishResult.SequenceConflict());
+                }
+
+                if (!record.RunId.Equals(journal.RunId))
                 {
                     return ValueTask.FromResult(JournalPublishResult.SequenceConflict());
                 }
@@ -300,14 +317,17 @@ public sealed class FakeJournalBoundaryTests
         }
 
         private sealed class JournalData(
+            ExecutionRunId runId,
             ExecutionManifest manifest,
             IEnumerable<ExecutionJournalRecord> records)
         {
+            public ExecutionRunId RunId { get; } = runId;
+
             public ExecutionManifest Manifest { get; } = manifest;
 
             public List<ExecutionJournalRecord> Records { get; } = [.. records];
 
-            public ExecutionJournalSnapshot Snapshot() => new(Manifest, Records);
+            public ExecutionJournalSnapshot Snapshot() => new(RunId, Manifest, Records);
         }
     }
 

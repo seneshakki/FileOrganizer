@@ -3,6 +3,7 @@ using FileOrganizer.Application.Journaling;
 using FileOrganizer.Application.Orchestration;
 using FileOrganizer.Application.Recovery;
 using FileOrganizer.Application.Tests.Execution;
+using FileOrganizer.Application.Tests.Journaling;
 using FileOrganizer.Core.Physical;
 
 namespace FileOrganizer.Application.Tests.Orchestration;
@@ -107,7 +108,9 @@ internal sealed class ScriptedJournalStore : IExecutionJournalStore
     internal void Seed(
         ExecutionManifest manifest,
         IEnumerable<ExecutionJournalRecord> records) =>
-        _journals.Add(manifest.Fingerprint, new JournalData(manifest, [.. records]));
+        _journals.Add(
+            manifest.Fingerprint,
+            new JournalData(TestExecutionRuns.Id, manifest, [.. records]));
 
     public ValueTask<ExecutionJournalSnapshot?> ReadAsync(
         PlanFingerprint fingerprint,
@@ -152,7 +155,7 @@ internal sealed class ScriptedJournalStore : IExecutionJournalStore
                     blocker.Snapshot()));
         }
 
-        JournalData created = new(manifest, [startRecord]);
+        JournalData created = new(startRecord.RunId, manifest, [startRecord]);
         _journals.Add(manifest.Fingerprint, created);
         OnBoundary?.Invoke(
             new JournalBoundary(JournalFaultBoundary.AfterBegin, startRecord));
@@ -175,6 +178,11 @@ internal sealed class ScriptedJournalStore : IExecutionJournalStore
         }
 
         JournalData data = _journals[record.Fingerprint];
+        if (!record.RunId.Equals(data.RunId))
+        {
+            return ValueTask.FromResult(JournalPublishResult.SequenceConflict());
+        }
+
         JournalPublishResult result;
         if (record.Sequence < data.Records.Count)
         {
@@ -212,14 +220,17 @@ internal sealed class ScriptedJournalStore : IExecutionJournalStore
     }
 
     private sealed class JournalData(
+        ExecutionRunId runId,
         ExecutionManifest manifest,
         List<ExecutionJournalRecord> records)
     {
+        internal ExecutionRunId RunId { get; } = runId;
+
         internal ExecutionManifest Manifest { get; } = manifest;
 
         internal List<ExecutionJournalRecord> Records { get; } = records;
 
-        internal ExecutionJournalSnapshot Snapshot() => new(Manifest, Records);
+        internal ExecutionJournalSnapshot Snapshot() => new(RunId, Manifest, Records);
     }
 }
 

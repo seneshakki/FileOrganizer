@@ -3,6 +3,7 @@ using FileOrganizer.Application.Journaling;
 using FileOrganizer.Application.Orchestration;
 using FileOrganizer.Application.Recovery;
 using FileOrganizer.Application.Tests.Execution;
+using FileOrganizer.Application.Tests.Journaling;
 using FileOrganizer.Core.Actions;
 using FileOrganizer.Core.Planning;
 
@@ -72,6 +73,7 @@ public sealed class OrganizationPlanRecoveryTests
             record => record.Kind == ExecutionJournalRecordKind.ExecutionCompleted);
         ExecutionJournalState state = ExecutionJournalStateMachine.Replay(
             new ExecutionJournalSnapshot(
+                context.Journal.Records(fingerprint)[0].RunId,
                 result.Manifest!,
                 context.Journal.Records(fingerprint)));
         Assert.Equal(ExecutionJournalStatus.Resumable, state.Status);
@@ -282,9 +284,11 @@ public sealed class OrganizationPlanRecoveryTests
         ExecutionManifest requested = Compile(Plan());
         ExecutionManifest other = Compile(Plan("other"));
         context.Journal.ReadOverride = _ => new ExecutionJournalSnapshot(
+            TestExecutionRuns.Id,
             other,
             [
                 ExecutionJournalRecord.ExecutionStarted(
+                    TestExecutionRuns.Id,
                     other.Fingerprint,
                     0,
                     ExecutionTime),

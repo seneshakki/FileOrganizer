@@ -2,6 +2,7 @@ using FileOrganizer.Application.Execution;
 using FileOrganizer.Application.Journaling;
 using FileOrganizer.Application.Orchestration;
 using FileOrganizer.Application.Tests.Execution;
+using FileOrganizer.Application.Tests.Journaling;
 using FileOrganizer.Core.Actions;
 using FileOrganizer.Core.Physical;
 using FileOrganizer.Core.Planning;
@@ -209,6 +210,7 @@ public sealed class OrganizationPlanExecutorTests
             ExecutionJournalStatus.Resumable,
             ExecutionJournalStateMachine.Replay(
                 new ExecutionJournalSnapshot(
+                    context.Journal.Records(result.Fingerprint!)[0].RunId,
                     result.Manifest!,
                     context.Journal.Records(result.Fingerprint!))).Status);
     }
@@ -445,6 +447,7 @@ public sealed class OrganizationPlanExecutorTests
             requested.Kind == ExecutionJournalRecordKind.MoveIntent
                 ? JournalPublishResult.AlreadyPublished(
                     ExecutionJournalRecord.ExecutionStarted(
+                        requested.RunId,
                         requested.Fingerprint,
                         requested.Sequence,
                         requested.RecordedAtUtc))
@@ -466,10 +469,12 @@ public sealed class OrganizationPlanExecutorTests
             manifest,
             [
                 ExecutionJournalRecord.ExecutionStarted(
+                    TestExecutionRuns.Id,
                     manifest.Fingerprint,
                     0,
                     ExecutionTime),
                 ExecutionJournalRecord.ExecutionInterrupted(
+                    TestExecutionRuns.Id,
                     manifest.Fingerprint,
                     1,
                     ExecutionTime,
@@ -499,21 +504,25 @@ public sealed class OrganizationPlanExecutorTests
             manifest,
             [
                 ExecutionJournalRecord.ExecutionStarted(
+                    TestExecutionRuns.Id,
                     manifest.Fingerprint,
                     0,
                     ExecutionTime),
                 ExecutionJournalRecord.MoveIntent(
+                    TestExecutionRuns.Id,
                     manifest.Fingerprint,
                     1,
                     ExecutionTime,
                     0,
                     identity),
                 ExecutionJournalRecord.MoveApplied(
+                    TestExecutionRuns.Id,
                     manifest.Fingerprint,
                     2,
                     ExecutionTime,
                     0),
                 ExecutionJournalRecord.ExecutionInterrupted(
+                    TestExecutionRuns.Id,
                     manifest.Fingerprint,
                     3,
                     ExecutionTime,

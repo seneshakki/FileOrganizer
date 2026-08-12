@@ -7,6 +7,9 @@ namespace FileOrganizer.Application.Tests.Journaling;
 
 public sealed class ExecutionJournalRecordTests
 {
+    private static readonly ExecutionRunId RunId =
+        new("0123456789abcdef0123456789abcdef");
+
     private static readonly DateTimeOffset RecordedAt =
         new(2026, 8, 9, 12, 0, 0, TimeSpan.FromHours(3));
 
@@ -19,13 +22,15 @@ public sealed class ExecutionJournalRecordTests
             volumeIdentity: "volume",
             scheme: "test-id-v1");
         ExecutionJournalRecord first = ExecutionJournalRecord.MoveIntent(
+            RunId,
             fingerprint,
             1,
             RecordedAt,
             0,
             identity);
         ExecutionJournalRecord second = ExecutionJournalRecord.MoveIntent(
-            new PlanFingerprint(fingerprint.Value.ToUpperInvariant()),
+            new ExecutionRunId(RunId.Value),
+            new PlanFingerprint(fingerprint.Value),
             1,
             RecordedAt.ToUniversalTime(),
             0,
@@ -47,6 +52,7 @@ public sealed class ExecutionJournalRecordTests
 
         Assert.Throws<ArgumentException>(
             () => ExecutionJournalRecord.MoveIntent(
+                RunId,
                 manifest.Fingerprint,
                 1,
                 RecordedAt,
@@ -60,9 +66,10 @@ public sealed class ExecutionJournalRecordTests
         PlanFingerprint fingerprint = JournalTestManifest.Create().Fingerprint;
 
         Assert.Throws<ArgumentOutOfRangeException>(
-            () => ExecutionJournalRecord.ExecutionStarted(fingerprint, -1, RecordedAt));
+            () => ExecutionJournalRecord.ExecutionStarted(RunId, fingerprint, -1, RecordedAt));
         Assert.Throws<ArgumentException>(
             () => ExecutionJournalRecord.MoveNotApplied(
+                RunId,
                 fingerprint,
                 1,
                 RecordedAt,
@@ -70,6 +77,7 @@ public sealed class ExecutionJournalRecordTests
                 JournalRecordReasonKind.None));
         Assert.Throws<ArgumentException>(
             () => ExecutionJournalRecord.ExecutionStopped(
+                RunId,
                 fingerprint,
                 1,
                 RecordedAt,
@@ -77,6 +85,7 @@ public sealed class ExecutionJournalRecordTests
                 JournalRecordReasonKind.ExecutionFault));
         Assert.Throws<ArgumentException>(
             () => ExecutionJournalRecord.MoveApplied(
+                RunId,
                 fingerprint,
                 1,
                 RecordedAt,
@@ -90,10 +99,10 @@ public sealed class ExecutionJournalRecordTests
         ExecutionManifest manifest = JournalTestManifest.Create();
         List<ExecutionJournalRecord> records =
         [
-            ExecutionJournalRecord.ExecutionStarted(manifest.Fingerprint, 0, RecordedAt),
+            ExecutionJournalRecord.ExecutionStarted(RunId, manifest.Fingerprint, 0, RecordedAt),
         ];
 
-        ExecutionJournalSnapshot snapshot = new(manifest, records);
+        ExecutionJournalSnapshot snapshot = new(RunId, manifest, records);
         records.Clear();
 
         Assert.Same(manifest, snapshot.Manifest);

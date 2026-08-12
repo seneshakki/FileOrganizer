@@ -1,8 +1,8 @@
 namespace FileOrganizer.Application.Journaling;
 
 /// <summary>
-/// Reports whether an append was published, already existed byte-for-byte at
-/// the requested sequence, or collided with a different durable record.
+/// Reports whether an append was published, already existed as the same
+/// logical record at the requested sequence, or collided with a different record.
 /// </summary>
 public sealed class JournalPublishResult
 {

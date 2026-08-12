@@ -6,6 +6,7 @@ public enum JournalSequenceProblemKind
     InvalidManifestOrdinals,
     SequenceGap,
     FingerprintMismatch,
+    RunMismatch,
     StartRequired,
     DuplicateStart,
     RecordAfterTerminal,

@@ -16,13 +16,49 @@ namespace FileOrganizer.Core.Planning;
 /// </remarks>
 public sealed class SourcePrecondition
 {
-    internal SourcePrecondition(CanonicalPath canonicalPath, FileEntry source)
+    /// <summary>
+    /// Reconstructs a source precondition from a trusted, read-only metadata
+    /// snapshot without consulting the file system.
+    /// </summary>
+    public SourcePrecondition(
+        CanonicalPath canonicalPath,
+        long length,
+        DateTimeOffset? createdUtc,
+        DateTimeOffset modifiedUtc,
+        PhysicalEntryIdentity? physicalIdentity)
     {
+        ArgumentNullException.ThrowIfNull(canonicalPath);
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
+
+        if (canonicalPath.IsRoot)
+        {
+            throw new ArgumentException(
+                "A source precondition path must include a file name.",
+                nameof(canonicalPath));
+        }
+
+        if (physicalIdentity?.EntryKind is not (null or PhysicalEntryKind.RegularFile))
+        {
+            throw new ArgumentException(
+                "A source precondition can retain only a regular-file physical identity.",
+                nameof(physicalIdentity));
+        }
+
         CanonicalPath = canonicalPath;
-        Length = source.SizeInBytes;
-        CreatedUtc = source.CreatedUtc;
-        ModifiedUtc = source.ModifiedUtc;
-        PhysicalIdentity = source.PhysicalIdentity;
+        Length = length;
+        CreatedUtc = createdUtc?.ToUniversalTime();
+        ModifiedUtc = modifiedUtc.ToUniversalTime();
+        PhysicalIdentity = physicalIdentity;
+    }
+
+    internal SourcePrecondition(CanonicalPath canonicalPath, FileEntry source)
+        : this(
+            canonicalPath,
+            source.SizeInBytes,
+            source.CreatedUtc,
+            source.ModifiedUtc,
+            source.PhysicalIdentity)
+    {
     }
 
     /// <summary>Gets the canonical source path used for planning.</summary>

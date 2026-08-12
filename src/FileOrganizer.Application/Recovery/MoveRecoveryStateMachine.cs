@@ -72,11 +72,13 @@ public static class MoveRecoveryStateMachine
     }
 
     public static RecoveryDecision Decide(
+        ExecutionRunId runId,
         ExecutionJournalState journalState,
         RecoveryEntryObservation source,
         RecoveryEntryObservation target,
         DateTimeOffset recordedAtUtc)
     {
+        ArgumentNullException.ThrowIfNull(runId);
         ArgumentNullException.ThrowIfNull(journalState);
         ExecutionJournalOperationState? operation = journalState.ActiveOperationOrdinal is int ordinal
             ? journalState.Operations.Single(candidate => candidate.Ordinal == ordinal)
@@ -90,6 +92,7 @@ public static class MoveRecoveryStateMachine
         if (journalState.ActiveOperationOrdinal is int activeOrdinal)
         {
             ExecutionJournalRecord record = CreateRecord(
+                runId,
                 journalState,
                 activeOrdinal,
                 resolution,
@@ -114,6 +117,7 @@ public static class MoveRecoveryStateMachine
     }
 
     private static ExecutionJournalRecord CreateRecord(
+        ExecutionRunId runId,
         ExecutionJournalState state,
         int ordinal,
         RecoveryResolution resolution,
@@ -124,30 +128,35 @@ public static class MoveRecoveryStateMachine
         return resolution.Disposition switch
         {
             RecoveryDisposition.Applied => ExecutionJournalRecord.MoveApplied(
+                runId,
                 state.Fingerprint,
                 state.NextSequence,
                 recordedAtUtc,
                 ordinal,
                 reason),
             RecoveryDisposition.NotApplied => ExecutionJournalRecord.MoveNotApplied(
+                runId,
                 state.Fingerprint,
                 state.NextSequence,
                 recordedAtUtc,
                 ordinal,
                 reason),
             RecoveryDisposition.Conflict => ExecutionJournalRecord.MoveConflict(
+                runId,
                 state.Fingerprint,
                 state.NextSequence,
                 recordedAtUtc,
                 ordinal,
                 reason),
             RecoveryDisposition.Ambiguous => ExecutionJournalRecord.MoveAmbiguous(
+                runId,
                 state.Fingerprint,
                 state.NextSequence,
                 recordedAtUtc,
                 ordinal,
                 reason),
             RecoveryDisposition.ManualRecovery => ExecutionJournalRecord.MoveManualRecovery(
+                runId,
                 state.Fingerprint,
                 state.NextSequence,
                 recordedAtUtc,

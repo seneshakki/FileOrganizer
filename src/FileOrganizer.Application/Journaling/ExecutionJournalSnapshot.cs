@@ -9,9 +9,11 @@ public sealed class ExecutionJournalSnapshot
     private readonly ReadOnlyCollection<ExecutionJournalRecord> _records;
 
     public ExecutionJournalSnapshot(
+        ExecutionRunId runId,
         ExecutionManifest manifest,
         IEnumerable<ExecutionJournalRecord> records)
     {
+        ArgumentNullException.ThrowIfNull(runId);
         ArgumentNullException.ThrowIfNull(manifest);
         ArgumentNullException.ThrowIfNull(records);
 
@@ -21,9 +23,20 @@ public sealed class ExecutionJournalSnapshot
             ArgumentNullException.ThrowIfNull(record, nameof(records));
         }
 
+        if (snapshot.Any(record => !record.RunId.Equals(runId)))
+        {
+            throw new ArgumentException(
+                "Every journal record must belong to the snapshot run.",
+                nameof(records));
+        }
+
+        RunId = runId;
         Manifest = manifest;
         _records = Array.AsReadOnly(snapshot);
     }
+
+    /// <summary>Gets the immutable owner of this execution attempt.</summary>
+    public ExecutionRunId RunId { get; }
 
     /// <summary>
     /// Gets the complete execution intent durably stored when this journal was

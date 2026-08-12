@@ -56,6 +56,7 @@ public static class ExecutionJournalStateMachine
         int? activeOrdinal = null;
         bool started = false;
         bool terminal = false;
+        ExecutionRunId? runId = null;
 
         for (int index = 0; index < recordSnapshot.Length; index++)
         {
@@ -80,6 +81,19 @@ public static class ExecutionJournalStateMachine
                     index,
                     record.Sequence,
                     "A journal record belongs to a different plan fingerprint.");
+            }
+
+            if (runId is null)
+            {
+                runId = record.RunId;
+            }
+            else if (!record.RunId.Equals(runId))
+            {
+                throw Problem(
+                    JournalSequenceProblemKind.RunMismatch,
+                    index,
+                    record.Sequence,
+                    "A journal record belongs to a different execution run.");
             }
 
             if (terminal)

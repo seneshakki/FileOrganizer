@@ -12,24 +12,22 @@ public sealed record PlanFingerprint
     {
         ArgumentNullException.ThrowIfNull(value);
 
-        if (value.Length != HexLength || !value.All(IsAsciiHexDigit))
+        if (value.Length != HexLength || !value.All(IsLowerHexDigit))
         {
             throw new ArgumentException(
-                "A plan fingerprint must contain exactly 64 hexadecimal characters.",
+                "A plan fingerprint must contain exactly 64 lowercase hexadecimal characters.",
                 nameof(value));
         }
 
-        Value = value.ToLowerInvariant();
+        Value = value;
     }
 
-    /// <summary>Gets the normalized lowercase SHA-256 value.</summary>
+    /// <summary>Gets the exact lowercase SHA-256 value.</summary>
     public string Value { get; }
 
     /// <inheritdoc />
     public override string ToString() => Value;
 
-    private static bool IsAsciiHexDigit(char value) =>
-        value is >= '0' and <= '9'
-            or >= 'a' and <= 'f'
-            or >= 'A' and <= 'F';
+    private static bool IsLowerHexDigit(char value) =>
+        value is >= '0' and <= '9' or >= 'a' and <= 'f';
 }

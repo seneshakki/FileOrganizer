@@ -5,13 +5,13 @@ namespace FileOrganizer.Application.Tests.Execution;
 public sealed class PlanFingerprintTests
 {
     [Fact]
-    public void NormalizesHexadecimalTextForValueEquality()
+    public void PreservesCanonicalLowercaseTextForValueEquality()
     {
-        string uppercase = new('A', PlanFingerprint.HexLength);
+        string lowercase = new('a', PlanFingerprint.HexLength);
 
-        PlanFingerprint fingerprint = new(uppercase);
+        PlanFingerprint fingerprint = new(lowercase);
 
-        Assert.Equal(new string('a', PlanFingerprint.HexLength), fingerprint.Value);
+        Assert.Equal(lowercase, fingerprint.Value);
         Assert.Equal(fingerprint.Value, fingerprint.ToString());
         Assert.Equal(new PlanFingerprint(fingerprint.Value), fingerprint);
     }
@@ -19,6 +19,7 @@ public sealed class PlanFingerprintTests
     [Theory]
     [InlineData("")]
     [InlineData("abc")]
+    [InlineData("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")]
     [InlineData("gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg")]
     public void RejectsValuesThatAreNotExactlyOneSha256HexDigest(string value)
     {
