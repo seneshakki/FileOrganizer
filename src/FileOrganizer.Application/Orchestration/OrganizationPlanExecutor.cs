@@ -106,14 +106,25 @@ public sealed class OrganizationPlanExecutor
 
         await using (executionLease.ConfigureAwait(false))
         {
-            ExecutionJournalSnapshot? existing = await _journal.ReadAsync(
+            ExecutionJournalReadResult existing = await _journal.ReadForReplayAsync(
                     manifest.Fingerprint,
                     cancellationToken)
                 .ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
-            if (existing is not null)
+            if (existing.Status == ExecutionJournalReadStatus.Invalid)
             {
-                return ExistingExecutionResult(manifest, existing, attemptStartedAt);
+                return InvalidExistingJournalResult(
+                    manifest,
+                    attemptStartedAt,
+                    existing.Problems);
+            }
+
+            if (existing.Status == ExecutionJournalReadStatus.Loaded)
+            {
+                return ExistingExecutionResult(
+                    manifest,
+                    existing.Snapshot!,
+                    attemptStartedAt);
             }
 
             ExecutionPreflightResult preflight = await _preflight.InspectAsync(
@@ -149,9 +160,20 @@ public sealed class OrganizationPlanExecutor
                     cancellationToken)
                 .ConfigureAwait(false);
 
+            if (begin.Status == JournalBeginStatus.InvalidExistingJournal)
+            {
+                return InvalidExistingJournalResult(
+                    manifest,
+                    attemptStartedAt,
+                    begin.Problems);
+            }
+
             if (begin.Status == JournalBeginStatus.AlreadyExists)
             {
-                return ExistingExecutionResult(manifest, begin.Snapshot, attemptStartedAt);
+                return ExistingExecutionResult(
+                    manifest,
+                    begin.Snapshot!,
+                    attemptStartedAt);
             }
 
             if (begin.Status == JournalBeginStatus.BlockedByUnresolvedExecution)
@@ -161,7 +183,7 @@ public sealed class OrganizationPlanExecutor
                     "A different unresolved execution journal blocks new execution.");
                 ExecutionProblem recovery = new(
                     ExecutionProblemKind.RecoveryRequired,
-                    $"Journal {begin.Snapshot.Fingerprint.Value} requires recovery first.");
+                    $"Journal {begin.Snapshot!.Fingerprint.Value} requires recovery first.");
                 return CreateNotAttemptedResult(
                     manifest,
                     attemptStartedAt,
@@ -169,7 +191,7 @@ public sealed class OrganizationPlanExecutor
                     [busy, recovery]);
             }
 
-            ValidateBegunSnapshot(manifest, startRecord, begin.Snapshot);
+            ValidateBegunSnapshot(manifest, startRecord, begin.Snapshot!);
 
             long nextSequence = 1;
             ExecutionItemResult[] results = manifest.Items
@@ -605,6 +627,33 @@ public sealed class OrganizationPlanExecutor
                             "The journal reducer produced an inconsistent recovery state."),
                     ]);
         }
+    }
+
+    private ExecutionResult InvalidExistingJournalResult(
+        ExecutionManifest manifest,
+        DateTimeOffset attemptStartedAt,
+        IReadOnlyList<ExecutionJournalReadProblem> journalProblems)
+    {
+        string diagnosticKinds = string.Join(
+            ", ",
+            journalProblems
+                .Where(static problem => problem.RequiresManualIntervention)
+                .Select(static problem => problem.Kind)
+                .Distinct()
+                .Order());
+        ExecutionProblem invalid = new(
+            ExecutionProblemKind.InvalidJournal,
+            diagnosticKinds.Length == 0
+                ? "The durable journal is invalid and requires manual intervention."
+                : $"The durable journal is invalid ({diagnosticKinds}) and requires manual intervention.");
+        ExecutionProblem recovery = new(
+            ExecutionProblemKind.RecoveryRequired,
+            "Execution cannot continue until the invalid durable journal is resolved explicitly.");
+        return CreateNotAttemptedResult(
+            manifest,
+            attemptStartedAt,
+            ExecutionOutcome.RecoveryRequired,
+            [invalid, recovery]);
     }
 
     private ExecutionResult ExistingExecutionResult(

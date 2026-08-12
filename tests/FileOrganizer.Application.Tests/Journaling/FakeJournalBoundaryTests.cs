@@ -29,9 +29,13 @@ public sealed class FakeJournalBoundaryTests
 
         Assert.Equal(JournalBeginStatus.Begun, first.Status);
         Assert.Equal(JournalBeginStatus.AlreadyExists, second.Status);
-        Assert.Same(manifest, first.Snapshot.Manifest);
-        Assert.Same(manifest, second.Snapshot.Manifest);
-        Assert.Equal(start, Assert.Single(second.Snapshot.Records));
+        ExecutionJournalSnapshot firstSnapshot = Assert.IsType<ExecutionJournalSnapshot>(
+            first.Snapshot);
+        ExecutionJournalSnapshot secondSnapshot = Assert.IsType<ExecutionJournalSnapshot>(
+            second.Snapshot);
+        Assert.Same(manifest, firstSnapshot.Manifest);
+        Assert.Same(manifest, secondSnapshot.Manifest);
+        Assert.Equal(start, Assert.Single(secondSnapshot.Records));
     }
 
     [Fact]
@@ -99,7 +103,9 @@ public sealed class FakeJournalBoundaryTests
         Assert.Equal(
             JournalBeginStatus.BlockedByUnresolvedExecution,
             blockedByFirst.Status);
-        Assert.Same(first, blockedByFirst.Snapshot.Manifest);
+        Assert.Same(
+            first,
+            Assert.IsType<ExecutionJournalSnapshot>(blockedByFirst.Snapshot).Manifest);
         Assert.Null(await store.ReadAsync(second.Fingerprint, cancellationToken));
 
         await CompleteAsync(store, first, cancellationToken);
@@ -119,7 +125,9 @@ public sealed class FakeJournalBoundaryTests
         Assert.Equal(
             JournalBeginStatus.BlockedByUnresolvedExecution,
             blockedByActive.Status);
-        Assert.Same(active, blockedByActive.Snapshot.Manifest);
+        Assert.Same(
+            active,
+            Assert.IsType<ExecutionJournalSnapshot>(blockedByActive.Snapshot).Manifest);
         Assert.NotNull(await store.ReadAsync(first.Fingerprint, cancellationToken));
         Assert.NotNull(await store.ReadAsync(second.Fingerprint, cancellationToken));
         Assert.NotNull(await store.ReadAsync(active.Fingerprint, cancellationToken));

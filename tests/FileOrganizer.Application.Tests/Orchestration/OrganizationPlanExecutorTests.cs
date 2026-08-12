@@ -334,6 +334,60 @@ public sealed class OrganizationPlanExecutorTests
     }
 
     [Fact]
+    public async Task CorruptDurableReadRequiresRecoveryBeforePreflightOrExecution()
+    {
+        OrganizationPlan plan = Plan(1);
+        Harness context = new();
+        context.Journal.ReplayReadOverride = _ => new ExecutionJournalReadResult(
+            ExecutionJournalReadStatus.Invalid,
+            problems:
+            [
+                new ExecutionJournalReadProblem(
+                    ExecutionJournalReadProblemKind.PayloadIntegrityViolation,
+                    recordSequence: 1),
+            ]);
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.RecoveryRequired, result.Outcome);
+        Assert.All(
+            result.Items,
+            item => Assert.Equal(ExecutionItemOutcome.NotAttempted, item.Outcome));
+        Assert.Equal(
+            [ExecutionProblemKind.InvalidJournal, ExecutionProblemKind.RecoveryRequired],
+            result.Problems.Select(static problem => problem.Kind));
+        Assert.Equal(0, context.Preflight.CallCount);
+        Assert.Equal(0, context.Journal.BeginCount);
+        Assert.Empty(context.Moves.AcquiredOrdinals);
+    }
+
+    [Fact]
+    public async Task JournalCorruptionDiscoveredAtAtomicBeginFailsStopBeforeAnyMove()
+    {
+        OrganizationPlan plan = Plan(1);
+        Harness context = new();
+        context.Journal.BeginOverride = (manifest, _) =>
+            JournalBeginResult.InvalidExistingJournal(
+                manifest.Fingerprint,
+                [
+                    new ExecutionJournalReadProblem(
+                        ExecutionJournalReadProblemKind.HashChainViolation,
+                        recordSequence: 2),
+                ]);
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(ExecutionItemOutcome.NotAttempted, Assert.Single(result.Items).Outcome);
+        Assert.Contains(
+            result.Problems,
+            problem => problem.Kind == ExecutionProblemKind.InvalidJournal);
+        Assert.Equal(1, context.Preflight.CallCount);
+        Assert.Equal(1, context.Journal.BeginCount);
+        Assert.Empty(context.Moves.AcquiredOrdinals);
+    }
+
+    [Fact]
     public async Task PendingIntentRequiresRecoveryAndIsNeverRetriedByExecute()
     {
         OrganizationPlan plan = Plan(1);

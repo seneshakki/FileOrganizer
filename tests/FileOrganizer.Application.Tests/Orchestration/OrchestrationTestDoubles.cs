@@ -88,6 +88,15 @@ internal sealed class ScriptedJournalStore : IExecutionJournalStore
 
     internal Func<PlanFingerprint, ExecutionJournalSnapshot?>? ReadOverride { get; set; }
 
+    internal Func<PlanFingerprint, ExecutionJournalReadResult>? ReplayReadOverride
+    {
+        get;
+        set;
+    }
+
+    internal Func<ExecutionManifest, ExecutionJournalRecord, JournalBeginResult?>?
+        BeginOverride { get; set; }
+
     internal Func<ExecutionJournalRecord, JournalPublishResult?>? PublishOverride
     {
         get;
@@ -129,6 +138,23 @@ internal sealed class ScriptedJournalStore : IExecutionJournalStore
                 : null);
     }
 
+    public async ValueTask<ExecutionJournalReadResult> ReadForReplayAsync(
+        PlanFingerprint fingerprint,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (ReplayReadOverride is not null)
+        {
+            ReadCount++;
+            return ReplayReadOverride(fingerprint);
+        }
+
+        ExecutionJournalSnapshot? snapshot = await ReadAsync(fingerprint, cancellationToken);
+        return snapshot is null
+            ? new ExecutionJournalReadResult(ExecutionJournalReadStatus.NotFound)
+            : new ExecutionJournalReadResult(ExecutionJournalReadStatus.Loaded, snapshot);
+    }
+
     public ValueTask<JournalBeginResult> BeginAsync(
         ExecutionManifest manifest,
         ExecutionJournalRecord startRecord,
@@ -138,6 +164,12 @@ internal sealed class ScriptedJournalStore : IExecutionJournalStore
         BeginCount++;
         OnBoundary?.Invoke(
             new JournalBoundary(JournalFaultBoundary.BeforeBegin, startRecord));
+
+        JournalBeginResult? overridden = BeginOverride?.Invoke(manifest, startRecord);
+        if (overridden is not null)
+        {
+            return ValueTask.FromResult(overridden);
+        }
 
         if (_journals.TryGetValue(manifest.Fingerprint, out JournalData? existing))
         {

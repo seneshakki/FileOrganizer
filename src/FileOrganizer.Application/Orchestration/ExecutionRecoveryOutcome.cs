@@ -7,6 +7,11 @@ public enum ExecutionRecoveryOutcome
     Busy,
     Completed,
     Resumable,
+    /// <summary>
+    /// A durable move intent has no durable outcome. Physical reconciliation is
+    /// required, but this classification never performs it.
+    /// </summary>
+    RecoveryRequired,
     Blocked,
     Conflict,
     Ambiguous,

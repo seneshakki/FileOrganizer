@@ -10,4 +10,10 @@ public enum JournalBeginStatus
     /// returned snapshot identifies the history that must be resolved first.
     /// </summary>
     BlockedByUnresolvedExecution,
+
+    /// <summary>
+    /// An existing durable journal could not be trusted. No execution claim
+    /// was created and explicit manual intervention is required.
+    /// </summary>
+    InvalidExistingJournal,
 }
