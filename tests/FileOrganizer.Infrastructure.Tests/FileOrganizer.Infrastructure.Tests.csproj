@@ -16,7 +16,17 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\FileOrganizer.Application\FileOrganizer.Application.csproj" />
     <ProjectReference Include="..\..\src\FileOrganizer.Infrastructure\FileOrganizer.Infrastructure.csproj" />
+    <ProjectReference Include="..\FileOrganizer.Infrastructure.LeaseProbe\FileOrganizer.Infrastructure.LeaseProbe.csproj"
+                      ReferenceOutputAssembly="false" />
   </ItemGroup>
+
+  <Target Name="CopyLeaseProbe" AfterTargets="Build">
+    <ItemGroup>
+      <LeaseProbeArtifact Include="..\FileOrganizer.Infrastructure.LeaseProbe\bin\$(Configuration)\net10.0\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(LeaseProbeArtifact)"
+          DestinationFolder="$(OutDir)LeaseProbe" />
+  </Target>
 
   <ItemGroup>
     <Using Include="Xunit" />
