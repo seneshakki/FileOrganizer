@@ -331,6 +331,8 @@ internal sealed class ScriptedMovePort : IMoveOperationPort, IRecoveryObservatio
 
     internal List<IGlobalExecutionLease> AcquisitionExecutionLeases { get; } = [];
 
+    internal List<ExecutionManifest> AcquisitionManifests { get; } = [];
+
     internal List<IGlobalExecutionLease> RecoveryExecutionLeases { get; } = [];
 
     internal ScriptedMoveStep this[int ordinal]
@@ -349,12 +351,15 @@ internal sealed class ScriptedMovePort : IMoveOperationPort, IRecoveryObservatio
 
     public ValueTask<MoveLeaseAcquisition> TryAcquireAsync(
         IGlobalExecutionLease executionLease,
+        ExecutionManifest manifest,
         ExecutionManifestItem item,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(executionLease);
+        ArgumentNullException.ThrowIfNull(manifest);
         cancellationToken.ThrowIfCancellationRequested();
         AcquisitionExecutionLeases.Add(executionLease);
+        AcquisitionManifests.Add(manifest);
         AcquiredOrdinals.Add(item.Ordinal);
         ScriptedMoveStep step = this[item.Ordinal];
         return ValueTask.FromResult(

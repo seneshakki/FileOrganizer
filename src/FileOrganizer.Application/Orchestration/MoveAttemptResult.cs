@@ -3,40 +3,73 @@ using FileOrganizer.Application.Execution;
 namespace FileOrganizer.Application.Orchestration;
 
 /// <summary>
-/// What the abstract move primitive reported. The executor always performs a
-/// separate observation and treats that observation as the authoritative state.
+/// What the abstract move primitive reported. The executor always reconciles
+/// this report with a fresh physical observation: proof of an applied,
+/// conflicting, or ambiguous physical state takes precedence, while proof that
+/// the source remained unmoved preserves a reported block or target conflict.
 /// </summary>
 public sealed class MoveAttemptResult
 {
-    private MoveAttemptResult(bool reportedSuccess, ExecutionProblem? problem)
+    private MoveAttemptResult(MoveAttemptOutcome outcome, ExecutionProblem? problem)
     {
-        if (reportedSuccess == (problem is not null))
+        if (!Enum.IsDefined(outcome))
+        {
+            throw new ArgumentOutOfRangeException(nameof(outcome));
+        }
+
+        bool succeeded = outcome == MoveAttemptOutcome.Succeeded;
+        if (succeeded == (problem is not null))
         {
             throw new ArgumentException(
-                "A reported move failure requires exactly one structured problem.",
+                "A successful move attempt requires no problem; every other outcome requires one.",
                 nameof(problem));
         }
 
-        if (problem is not null && problem.Kind != ExecutionProblemKind.MoveFailed)
+        bool problemMatchesOutcome = outcome switch
+        {
+            MoveAttemptOutcome.Succeeded => true,
+            MoveAttemptOutcome.Blocked => problem!.Kind is
+                ExecutionProblemKind.SourceRevalidationFailed
+                or ExecutionProblemKind.DestinationRevalidationFailed,
+            MoveAttemptOutcome.Conflict =>
+                problem!.Kind == ExecutionProblemKind.DestinationConflict,
+            MoveAttemptOutcome.Failed => problem!.Kind == ExecutionProblemKind.MoveFailed,
+            _ => false,
+        };
+        if (!problemMatchesOutcome)
         {
             throw new ArgumentException(
-                "A move-attempt failure requires a move-failed problem.",
+                "The move-attempt problem is incompatible with its outcome.",
                 nameof(problem));
         }
 
-        ReportedSuccess = reportedSuccess;
+        Outcome = outcome;
         Problem = problem;
     }
 
-    public bool ReportedSuccess { get; }
+    public MoveAttemptOutcome Outcome { get; }
+
+    public bool ReportedSuccess => Outcome == MoveAttemptOutcome.Succeeded;
 
     public ExecutionProblem? Problem { get; }
 
-    public static MoveAttemptResult Success() => new(reportedSuccess: true, null);
+    public static MoveAttemptResult Success() => new(MoveAttemptOutcome.Succeeded, null);
+
+    public static MoveAttemptResult Blocked(ExecutionProblem problem)
+    {
+        ArgumentNullException.ThrowIfNull(problem);
+        return new(MoveAttemptOutcome.Blocked, problem);
+    }
+
+    public static MoveAttemptResult Conflict(ExecutionProblem problem)
+    {
+        ArgumentNullException.ThrowIfNull(problem);
+        return new(MoveAttemptOutcome.Conflict, problem);
+    }
 
     public static MoveAttemptResult Failure(ExecutionProblem problem)
     {
         ArgumentNullException.ThrowIfNull(problem);
-        return new(reportedSuccess: false, problem);
+        return new(MoveAttemptOutcome.Failed, problem);
     }
 }

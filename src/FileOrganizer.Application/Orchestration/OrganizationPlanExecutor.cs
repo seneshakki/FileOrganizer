@@ -211,6 +211,7 @@ public sealed class OrganizationPlanExecutor
                 {
                     acquisition = await _moves.TryAcquireAsync(
                             executionLease,
+                            manifest,
                             item,
                             cancellationToken)
                         .ConfigureAwait(false);
@@ -334,6 +335,7 @@ public sealed class OrganizationPlanExecutor
                         nextSequence++,
                         NextJournalTime(ref lastJournalTime),
                         ordinal,
+                        attempt,
                         resolution);
                     await PublishRequiredAsync(outcomeRecord).ConfigureAwait(false);
 
@@ -350,14 +352,9 @@ public sealed class OrganizationPlanExecutor
                         ordinal,
                         attempt,
                         resolution);
-                    ExecutionItemOutcome operationOutcome = resolution.Disposition switch
-                    {
-                        RecoveryDisposition.NotApplied => ExecutionItemOutcome.NotApplied,
-                        RecoveryDisposition.Conflict => ExecutionItemOutcome.Conflict,
-                        RecoveryDisposition.Ambiguous or RecoveryDisposition.ManualRecovery =>
-                            ExecutionItemOutcome.Ambiguous,
-                        _ => throw new UnreachableException(),
-                    };
+                    ExecutionItemOutcome operationOutcome = ToExecutionItemOutcome(
+                        attempt,
+                        resolution);
                     results[ordinal] = new ExecutionItemResult(
                         ordinal,
                         operationOutcome,
@@ -1001,6 +998,7 @@ public sealed class OrganizationPlanExecutor
         long sequence,
         DateTimeOffset recordedAtUtc,
         int ordinal,
+        MoveAttemptResult attempt,
         RecoveryResolution resolution) => resolution.Disposition switch
         {
             RecoveryDisposition.Applied => ExecutionJournalRecord.MoveApplied(
@@ -1009,13 +1007,30 @@ public sealed class OrganizationPlanExecutor
                 sequence,
                 recordedAtUtc,
                 ordinal),
-            RecoveryDisposition.NotApplied => ExecutionJournalRecord.MoveNotApplied(
-                runId,
-                fingerprint,
-                sequence,
-                recordedAtUtc,
-                ordinal,
-                JournalRecordReasonKind.MoveDidNotApply),
+            RecoveryDisposition.NotApplied => attempt.Outcome switch
+            {
+                MoveAttemptOutcome.Blocked => ExecutionJournalRecord.MoveNotApplied(
+                    runId,
+                    fingerprint,
+                    sequence,
+                    recordedAtUtc,
+                    ordinal,
+                    ToRevalidationReason(attempt.Problem!)),
+                MoveAttemptOutcome.Conflict => ExecutionJournalRecord.MoveConflict(
+                    runId,
+                    fingerprint,
+                    sequence,
+                    recordedAtUtc,
+                    ordinal,
+                    JournalRecordReasonKind.DestinationConflict),
+                _ => ExecutionJournalRecord.MoveNotApplied(
+                    runId,
+                    fingerprint,
+                    sequence,
+                    recordedAtUtc,
+                    ordinal,
+                    JournalRecordReasonKind.MoveDidNotApply),
+            },
             RecoveryDisposition.Conflict => ExecutionJournalRecord.MoveConflict(
                 runId,
                 fingerprint,
@@ -1031,7 +1046,7 @@ public sealed class OrganizationPlanExecutor
                 sequence,
                 recordedAtUtc,
                 ordinal,
-                JournalRecordReasonKind.MoveOutcomeUnknown),
+                ToAmbiguousJournalReason(resolution.Reason)),
             RecoveryDisposition.ManualRecovery => ExecutionJournalRecord.MoveManualRecovery(
                 runId,
                 fingerprint,
@@ -1039,6 +1054,48 @@ public sealed class OrganizationPlanExecutor
                 recordedAtUtc,
                 ordinal,
                 JournalRecordReasonKind.RecoveryInspectionFailed),
+            _ => throw new UnreachableException(),
+        };
+
+    private static JournalRecordReasonKind ToRevalidationReason(ExecutionProblem problem) =>
+        problem.Kind switch
+        {
+            ExecutionProblemKind.SourceRevalidationFailed =>
+                JournalRecordReasonKind.SourceRevalidationFailed,
+            ExecutionProblemKind.DestinationRevalidationFailed =>
+                JournalRecordReasonKind.DestinationRevalidationFailed,
+            _ => throw new UnreachableException(),
+        };
+
+    private static JournalRecordReasonKind ToAmbiguousJournalReason(
+        RecoveryReasonKind reason) => reason switch
+        {
+            RecoveryReasonKind.SourceIdentityChanged =>
+                JournalRecordReasonKind.RecoverySourceIdentityChanged,
+            RecoveryReasonKind.TargetOccupiedByDifferentEntry =>
+                JournalRecordReasonKind.RecoveryTargetIdentityChanged,
+            RecoveryReasonKind.ExpectedEntryAtBothPaths =>
+                JournalRecordReasonKind.RecoveryBothPathsContainExpectedEntry,
+            RecoveryReasonKind.BothPathsMissing =>
+                JournalRecordReasonKind.RecoveryBothPathsMissing,
+            RecoveryReasonKind.InspectionFailed =>
+                JournalRecordReasonKind.RecoveryInspectionFailed,
+            _ => JournalRecordReasonKind.MoveOutcomeUnknown,
+        };
+
+    private static ExecutionItemOutcome ToExecutionItemOutcome(
+        MoveAttemptResult attempt,
+        RecoveryResolution resolution) => resolution.Disposition switch
+        {
+            RecoveryDisposition.NotApplied => attempt.Outcome switch
+            {
+                MoveAttemptOutcome.Blocked => ExecutionItemOutcome.Blocked,
+                MoveAttemptOutcome.Conflict => ExecutionItemOutcome.Conflict,
+                _ => ExecutionItemOutcome.NotApplied,
+            },
+            RecoveryDisposition.Conflict => ExecutionItemOutcome.Conflict,
+            RecoveryDisposition.Ambiguous or RecoveryDisposition.ManualRecovery =>
+                ExecutionItemOutcome.Ambiguous,
             _ => throw new UnreachableException(),
         };
 

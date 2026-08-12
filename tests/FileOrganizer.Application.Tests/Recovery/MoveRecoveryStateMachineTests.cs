@@ -39,8 +39,14 @@ public sealed class MoveRecoveryStateMachineTests
             {
                 RecoveryEntryObservation.Present(Different),
                 RecoveryEntryObservation.Missing(),
-                RecoveryDisposition.Conflict,
+                RecoveryDisposition.Ambiguous,
                 RecoveryReasonKind.SourceIdentityChanged
+            },
+            {
+                RecoveryEntryObservation.Present(Different),
+                RecoveryEntryObservation.Present(Expected),
+                RecoveryDisposition.Applied,
+                RecoveryReasonKind.ExpectedEntryAtTargetOnly
             },
             {
                 RecoveryEntryObservation.Present(Expected),
@@ -64,8 +70,24 @@ public sealed class MoveRecoveryStateMachineTests
                 RecoveryEntryObservation.InspectionFailed(
                     RecoveryInspectionFailureKind.AccessDenied),
                 RecoveryEntryObservation.Missing(),
-                RecoveryDisposition.ManualRecovery,
+                RecoveryDisposition.Ambiguous,
                 RecoveryReasonKind.InspectionFailed
+            },
+            {
+                RecoveryEntryObservation.Missing(),
+                RecoveryEntryObservation.Present(Different),
+                RecoveryDisposition.Ambiguous,
+                RecoveryReasonKind.TargetOccupiedByDifferentEntry
+            },
+            {
+                RecoveryEntryObservation.Present(Different),
+                RecoveryEntryObservation.Present(
+                    TestPhysicalIdentities.File(
+                        "entry-100",
+                        "volume-a",
+                        "windows-file-id-v1")),
+                RecoveryDisposition.Ambiguous,
+                RecoveryReasonKind.SourceIdentityChanged
             },
         };
 
@@ -89,9 +111,8 @@ public sealed class MoveRecoveryStateMachineTests
     [Theory]
     [InlineData(RecoveryDisposition.Applied, ExecutionJournalRecordKind.MoveApplied, JournalRecordReasonKind.RecoveryConfirmedApplied)]
     [InlineData(RecoveryDisposition.NotApplied, ExecutionJournalRecordKind.MoveNotApplied, JournalRecordReasonKind.RecoveryConfirmedNotApplied)]
-    [InlineData(RecoveryDisposition.Conflict, ExecutionJournalRecordKind.MoveConflict, JournalRecordReasonKind.RecoverySourceIdentityChanged)]
+    [InlineData(RecoveryDisposition.Conflict, ExecutionJournalRecordKind.MoveConflict, JournalRecordReasonKind.RecoveryTargetIdentityChanged)]
     [InlineData(RecoveryDisposition.Ambiguous, ExecutionJournalRecordKind.MoveAmbiguous, JournalRecordReasonKind.RecoveryBothPathsMissing)]
-    [InlineData(RecoveryDisposition.ManualRecovery, ExecutionJournalRecordKind.MoveManualRecovery, JournalRecordReasonKind.RecoveryInspectionFailed)]
     public void CreatesTheExactNextJournalPublication(
         RecoveryDisposition disposition,
         ExecutionJournalRecordKind recordKind,
@@ -115,6 +136,25 @@ public sealed class MoveRecoveryStateMachineTests
         Assert.Equal(journalReason, record.Reason);
         Assert.Equal(2, record.Sequence);
         Assert.Equal(0, record.OperationOrdinal);
+    }
+
+    [Fact]
+    public void InspectionFailureIsDurablyRecordedAsAmbiguous()
+    {
+        ExecutionManifest manifest = JournalTestManifest.Create();
+
+        RecoveryDecision decision = MoveRecoveryStateMachine.Decide(
+            TestExecutionRuns.Id,
+            Pending(manifest),
+            RecoveryEntryObservation.InspectionFailed(
+                RecoveryInspectionFailureKind.IoFailure),
+            RecoveryEntryObservation.Missing(),
+            StartedAt.AddMinutes(1));
+
+        Assert.Equal(RecoveryDisposition.Ambiguous, decision.Resolution.Disposition);
+        ExecutionJournalRecord record = Assert.IsType<ExecutionJournalRecord>(decision.Record);
+        Assert.Equal(ExecutionJournalRecordKind.MoveAmbiguous, record.Kind);
+        Assert.Equal(JournalRecordReasonKind.RecoveryInspectionFailed, record.Reason);
     }
 
     [Fact]
@@ -237,8 +277,8 @@ public sealed class MoveRecoveryStateMachineTests
                 RecoveryEntryObservation.Present(Expected),
                 RecoveryEntryObservation.Missing()),
             RecoveryDisposition.Conflict => (
-                RecoveryEntryObservation.Present(Different),
-                RecoveryEntryObservation.Missing()),
+                RecoveryEntryObservation.Present(Expected),
+                RecoveryEntryObservation.Present(Different)),
             RecoveryDisposition.Ambiguous => (
                 RecoveryEntryObservation.Missing(),
                 RecoveryEntryObservation.Missing()),

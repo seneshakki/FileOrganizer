@@ -17,6 +17,7 @@ public interface IMoveOperationPort
 {
     ValueTask<MoveLeaseAcquisition> TryAcquireAsync(
         IGlobalExecutionLease executionLease,
+        ExecutionManifest manifest,
         ExecutionManifestItem item,
         CancellationToken cancellationToken = default);
 }

@@ -1,6 +1,7 @@
 using FileOrganizer.Application.Execution;
 using FileOrganizer.Application.Journaling;
 using FileOrganizer.Application.Orchestration;
+using FileOrganizer.Application.Recovery;
 using FileOrganizer.Application.Tests.Execution;
 using FileOrganizer.Application.Tests.Journaling;
 using FileOrganizer.Core.Actions;
@@ -31,6 +32,10 @@ public sealed class OrganizationPlanExecutorTests
         Assert.All(
             context.Moves.AcquisitionExecutionLeases,
             lease => Assert.Same(context.Preflight.ExecutionLease, lease));
+        Assert.Equal(3, context.Moves.AcquisitionManifests.Count);
+        Assert.All(
+            context.Moves.AcquisitionManifests,
+            manifest => Assert.Same(result.Manifest, manifest));
         Assert.False(context.GlobalLease.IsOwned);
         Assert.Equal(
             [
@@ -221,6 +226,88 @@ public sealed class OrganizationPlanExecutorTests
                     context.Journal.Records(result.Fingerprint!)[0].RunId,
                     result.Manifest!,
                     context.Journal.Records(result.Fingerprint!))).Status);
+    }
+
+    [Theory]
+    [InlineData(ExecutionProblemKind.SourceRevalidationFailed, JournalRecordReasonKind.SourceRevalidationFailed)]
+    [InlineData(ExecutionProblemKind.DestinationRevalidationFailed, JournalRecordReasonKind.DestinationRevalidationFailed)]
+    public async Task FinalRevalidationBlockRemainsBlockedAfterIntent(
+        ExecutionProblemKind problemKind,
+        JournalRecordReasonKind journalReason)
+    {
+        OrganizationPlan plan = Plan(2);
+        Harness context = new();
+        context.Moves[0].PostCommitObservation =
+            ScriptedMoveStep.SourceOnly(context.Moves[0].Identity);
+        context.Moves[0].AttemptResult = MoveAttemptResult.Blocked(
+            Problem(problemKind, "Final revalidation prevented mutation.", 0));
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.Stopped, result.Outcome);
+        Assert.Equal(
+            [ExecutionItemOutcome.Blocked, ExecutionItemOutcome.NotAttempted],
+            result.Items.Select(item => item.Outcome));
+        Assert.Equal(problemKind, Assert.Single(result.Problems).Kind);
+        ExecutionJournalRecord record = context.Journal.Records(result.Fingerprint!)[^1];
+        Assert.Equal(ExecutionJournalRecordKind.MoveNotApplied, record.Kind);
+        Assert.Equal(journalReason, record.Reason);
+        Assert.Equal(
+            ExecutionJournalStatus.Blocked,
+            ExecutionJournalStateMachine.Replay(
+                new ExecutionJournalSnapshot(
+                    context.Journal.Records(result.Fingerprint!)[0].RunId,
+                    result.Manifest!,
+                    context.Journal.Records(result.Fingerprint!))).Status);
+    }
+
+    [Fact]
+    public async Task NativeTargetRaceConflictRemainsConflictWhenObservationProvesUnmoved()
+    {
+        OrganizationPlan plan = Plan(2);
+        Harness context = new();
+        context.Moves[0].PostCommitObservation =
+            ScriptedMoveStep.SourceOnly(context.Moves[0].Identity);
+        context.Moves[0].AttemptResult = MoveAttemptResult.Conflict(
+            Problem(
+                ExecutionProblemKind.DestinationConflict,
+                "The target appeared at the native no-overwrite boundary.",
+                0));
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.Stopped, result.Outcome);
+        Assert.Equal(
+            [ExecutionItemOutcome.Conflict, ExecutionItemOutcome.NotAttempted],
+            result.Items.Select(item => item.Outcome));
+        Assert.Equal(
+            ExecutionProblemKind.DestinationConflict,
+            Assert.Single(result.Problems).Kind);
+        ExecutionJournalRecord record = context.Journal.Records(result.Fingerprint!)[^1];
+        Assert.Equal(ExecutionJournalRecordKind.MoveConflict, record.Kind);
+        Assert.Equal(JournalRecordReasonKind.DestinationConflict, record.Reason);
+    }
+
+    [Fact]
+    public async Task FailedPostMoveInspectionOverridesReportedSuccessAsAmbiguous()
+    {
+        OrganizationPlan plan = Plan(1);
+        Harness context = new();
+        context.Moves[0].PostCommitObservation = new MoveObservation(
+            RecoveryEntryObservation.InspectionFailed(
+                RecoveryInspectionFailureKind.IoFailure),
+            RecoveryEntryObservation.Missing());
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(ExecutionItemOutcome.Ambiguous, Assert.Single(result.Items).Outcome);
+        Assert.Equal(
+            ExecutionProblemKind.MoveOutcomeAmbiguous,
+            Assert.Single(result.Problems).Kind);
+        ExecutionJournalRecord record = context.Journal.Records(result.Fingerprint!)[^1];
+        Assert.Equal(ExecutionJournalRecordKind.MoveAmbiguous, record.Kind);
+        Assert.Equal(JournalRecordReasonKind.RecoveryInspectionFailed, record.Reason);
     }
 
     [Fact]

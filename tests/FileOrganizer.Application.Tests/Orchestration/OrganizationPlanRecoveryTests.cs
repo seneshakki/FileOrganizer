@@ -153,7 +153,7 @@ public sealed class OrganizationPlanRecoveryTests
     }
 
     [Fact]
-    public async Task RecoveryInspectionFailureRequiresManualRecovery()
+    public async Task RecoveryInspectionFailureIsAmbiguous()
     {
         OrganizationPlan plan = Plan();
         Harness context = new();
@@ -168,11 +168,14 @@ public sealed class OrganizationPlanRecoveryTests
 
         ExecutionRecoveryResult result = await context.RecoverAsync(fingerprint);
 
-        Assert.Equal(ExecutionRecoveryOutcome.ManualRecoveryRequired, result.Outcome);
-        Assert.Equal(RecoveryDisposition.ManualRecovery, result.Resolution?.Disposition);
+        Assert.Equal(ExecutionRecoveryOutcome.Ambiguous, result.Outcome);
+        Assert.Equal(RecoveryDisposition.Ambiguous, result.Resolution?.Disposition);
         Assert.Equal(
-            ExecutionJournalRecordKind.MoveManualRecovery,
+            ExecutionJournalRecordKind.MoveAmbiguous,
             context.Journal.Records(fingerprint)[^1].Kind);
+        Assert.Equal(
+            JournalRecordReasonKind.RecoveryInspectionFailed,
+            context.Journal.Records(fingerprint)[^1].Reason);
     }
 
     [Fact]

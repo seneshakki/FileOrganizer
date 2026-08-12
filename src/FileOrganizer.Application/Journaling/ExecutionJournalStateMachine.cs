@@ -173,13 +173,20 @@ public static class ExecutionJournalStateMachine
                     break;
 
                 case ExecutionJournalRecordKind.MoveNotApplied:
+                    bool wasBlocked = record.Reason is
+                        JournalRecordReasonKind.SourceRevalidationFailed
+                        or JournalRecordReasonKind.DestinationRevalidationFailed;
                     ApplyOutcome(
                         record,
                         index,
                         operations,
-                        JournalOperationStatus.NotApplied,
-                        ExecutionJournalStatus.Resumable,
-                        isTerminal: false,
+                        wasBlocked
+                            ? JournalOperationStatus.Blocked
+                            : JournalOperationStatus.NotApplied,
+                        wasBlocked
+                            ? ExecutionJournalStatus.Blocked
+                            : ExecutionJournalStatus.Resumable,
+                        isTerminal: wasBlocked,
                         ref activeOrdinal,
                         ref status,
                         ref terminal);

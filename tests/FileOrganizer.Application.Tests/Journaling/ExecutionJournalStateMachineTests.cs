@@ -146,6 +146,61 @@ public sealed class ExecutionJournalStateMachineTests
     }
 
     [Theory]
+    [InlineData(JournalRecordReasonKind.SourceRevalidationFailed)]
+    [InlineData(JournalRecordReasonKind.DestinationRevalidationFailed)]
+    public void PostIntentRevalidationFailureIsDurablyBlocked(
+        JournalRecordReasonKind reason)
+    {
+        ExecutionManifest manifest = JournalTestManifest.Create();
+        ExecutionJournalRecord blocked = ExecutionJournalRecord.MoveNotApplied(
+            TestExecutionRuns.Id,
+            manifest.Fingerprint,
+            2,
+            At(2),
+            0,
+            reason);
+
+        ExecutionJournalState state = ExecutionJournalStateMachine.Replay(
+            manifest,
+            [Start(manifest, 0), Intent(manifest, 1, 0), blocked]);
+
+        Assert.Equal(ExecutionJournalStatus.Blocked, state.Status);
+        Assert.True(state.IsTerminal);
+        Assert.Equal(JournalOperationStatus.Blocked, Assert.Single(state.Operations).Status);
+        Assert.Equal(reason, Assert.Single(state.Operations).Reason);
+    }
+
+    [Fact]
+    public void PostIntentRevalidationBlockRejectsEveryJournalTail()
+    {
+        ExecutionManifest manifest = JournalTestManifest.Create();
+        ExecutionJournalRecord blocked = ExecutionJournalRecord.MoveNotApplied(
+            TestExecutionRuns.Id,
+            manifest.Fingerprint,
+            2,
+            At(2),
+            0,
+            JournalRecordReasonKind.SourceRevalidationFailed);
+
+        InvalidJournalSequenceException exception =
+            Assert.Throws<InvalidJournalSequenceException>(
+                () => ExecutionJournalStateMachine.Replay(
+                    manifest,
+                    [
+                        Start(manifest, 0),
+                        Intent(manifest, 1, 0),
+                        blocked,
+                        ExecutionJournalRecord.ExecutionResumed(
+                            TestExecutionRuns.Id,
+                            manifest.Fingerprint,
+                            3,
+                            At(3)),
+                    ]));
+
+        Assert.Equal(JournalSequenceProblemKind.RecordAfterTerminal, exception.ProblemKind);
+    }
+
+    [Theory]
     [InlineData(JournalRecordReasonKind.SourceRevalidationFailed, JournalOperationStatus.Blocked, ExecutionJournalStatus.Blocked)]
     [InlineData(JournalRecordReasonKind.DestinationRevalidationFailed, JournalOperationStatus.Blocked, ExecutionJournalStatus.Blocked)]
     [InlineData(JournalRecordReasonKind.DestinationConflict, JournalOperationStatus.Conflict, ExecutionJournalStatus.Conflict)]

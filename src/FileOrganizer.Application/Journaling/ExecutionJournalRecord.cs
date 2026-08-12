@@ -189,7 +189,9 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
             reason,
             nameof(reason),
             JournalRecordReasonKind.MoveDidNotApply,
-            JournalRecordReasonKind.RecoveryConfirmedNotApplied);
+            JournalRecordReasonKind.RecoveryConfirmedNotApplied,
+            JournalRecordReasonKind.SourceRevalidationFailed,
+            JournalRecordReasonKind.DestinationRevalidationFailed);
         return new(
             runId,
             fingerprint,
@@ -238,8 +240,11 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
             reason,
             nameof(reason),
             JournalRecordReasonKind.MoveOutcomeUnknown,
+            JournalRecordReasonKind.RecoverySourceIdentityChanged,
+            JournalRecordReasonKind.RecoveryTargetIdentityChanged,
             JournalRecordReasonKind.RecoveryBothPathsContainExpectedEntry,
-            JournalRecordReasonKind.RecoveryBothPathsMissing);
+            JournalRecordReasonKind.RecoveryBothPathsMissing,
+            JournalRecordReasonKind.RecoveryInspectionFailed);
         return new(
             runId,
             fingerprint,

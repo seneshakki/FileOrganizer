@@ -23,32 +23,32 @@ public static class MoveRecoveryStateMachine
             || target.Kind == RecoveryEntryObservationKind.InspectionFailed)
         {
             return new(
-                RecoveryDisposition.ManualRecovery,
+                RecoveryDisposition.Ambiguous,
                 RecoveryReasonKind.InspectionFailed);
         }
 
         bool sourceIsExpected = IsExpected(source, expectedIdentity);
         bool targetIsExpected = IsExpected(target, expectedIdentity);
 
-        if (sourceIsExpected && target.Kind == RecoveryEntryObservationKind.Missing)
+        if (sourceIsExpected && targetIsExpected)
         {
             return new(
-                RecoveryDisposition.NotApplied,
-                RecoveryReasonKind.ExpectedEntryAtSourceOnly);
+                RecoveryDisposition.Ambiguous,
+                RecoveryReasonKind.ExpectedEntryAtBothPaths);
         }
 
-        if (source.Kind == RecoveryEntryObservationKind.Missing && targetIsExpected)
+        if (!sourceIsExpected && targetIsExpected)
         {
             return new(
                 RecoveryDisposition.Applied,
                 RecoveryReasonKind.ExpectedEntryAtTargetOnly);
         }
 
-        if (sourceIsExpected && targetIsExpected)
+        if (sourceIsExpected && target.Kind == RecoveryEntryObservationKind.Missing)
         {
             return new(
-                RecoveryDisposition.Ambiguous,
-                RecoveryReasonKind.ExpectedEntryAtBothPaths);
+                RecoveryDisposition.NotApplied,
+                RecoveryReasonKind.ExpectedEntryAtSourceOnly);
         }
 
         if (source.Kind == RecoveryEntryObservationKind.Missing
@@ -59,16 +59,18 @@ public static class MoveRecoveryStateMachine
                 RecoveryReasonKind.BothPathsMissing);
         }
 
-        if (source.Kind == RecoveryEntryObservationKind.Present && !sourceIsExpected)
+        if (sourceIsExpected)
         {
             return new(
                 RecoveryDisposition.Conflict,
-                RecoveryReasonKind.SourceIdentityChanged);
+                RecoveryReasonKind.TargetOccupiedByDifferentEntry);
         }
 
         return new(
-            RecoveryDisposition.Conflict,
-            RecoveryReasonKind.TargetOccupiedByDifferentEntry);
+            RecoveryDisposition.Ambiguous,
+            source.Kind == RecoveryEntryObservationKind.Present
+                ? RecoveryReasonKind.SourceIdentityChanged
+                : RecoveryReasonKind.TargetOccupiedByDifferentEntry);
     }
 
     public static RecoveryDecision Decide(
