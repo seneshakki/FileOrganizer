@@ -288,6 +288,58 @@ public sealed class WindowsPhysicalMoveAdapterTests
     }
 
     [Fact]
+    public async Task CommitTimeDestinationReparseObservationBlocksBeforeNativeCall()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows native move test.");
+        using TemporaryDirectory temporary = TemporaryDirectory.Create();
+        string sourceRoot = Path.Combine(temporary.FullPath, "source");
+        string destination = Path.Combine(temporary.FullPath, "destination");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(destination);
+        string source = temporary.WriteFile(Path.Combine("source", "report.txt"), "planned");
+        ExecutionManifest manifest = WindowsPhysicalMoveTestPlan.Create(
+            sourceRoot,
+            source,
+            destination);
+        CanonicalPath destinationPath = manifest.Items[0].DestinationDirectory;
+        var realObserver = new WindowsPhysicalIdentityAdapter();
+        int nativeCalls = 0;
+        var adapter = new WindowsPhysicalMoveAdapter(
+            isWindows: true,
+            (path, token) => StringComparer.OrdinalIgnoreCase.Equals(
+                path.Value,
+                destinationPath.Value)
+                    ? PhysicalEntryObservation.Unsupported(
+                        PhysicalEntryObservationReason.ReparsePoint,
+                        PhysicalEntryKind.ReparsePoint)
+                    : realObserver.Observe(path, token),
+            (_, _) =>
+            {
+                nativeCalls++;
+                return WindowsRenameResult.Success;
+            });
+
+        await using IGlobalExecutionLease globalLease = await AcquireGlobalLease();
+        MoveLeaseAcquisition acquisition = await adapter.TryAcquireAsync(
+            globalLease,
+            manifest,
+            manifest.Items[0],
+            TestContext.Current.CancellationToken);
+        await using IMoveOperationLease lease = Assert.IsAssignableFrom<IMoveOperationLease>(
+            acquisition.Lease);
+
+        MoveAttemptResult attempt = await lease.CommitAsync();
+
+        Assert.Equal(MoveAttemptOutcome.Blocked, attempt.Outcome);
+        Assert.Equal(
+            ExecutionProblemKind.DestinationRevalidationFailed,
+            attempt.Problem!.Kind);
+        Assert.Equal(0, nativeCalls);
+        Assert.True(File.Exists(source));
+        Assert.False(File.Exists(Path.Combine(destination, "report.txt")));
+    }
+
+    [Fact]
     public async Task NativeRaceConflictIsPreservedAndCommitIsOneShot()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows native move test.");

@@ -132,6 +132,7 @@ public sealed class WindowsPhysicalMoveAdapter : IMoveOperationPort
             MoveLeaseAcquisition? failure = OpenDirectoryChain(
                 sourceParent,
                 manifest.SourceRoot,
+                manifest.SourceRoot,
                 manifest.SourceRootPhysicalIdentity,
                 item,
                 isSourceBoundary: true,
@@ -144,6 +145,7 @@ public sealed class WindowsPhysicalMoveAdapter : IMoveOperationPort
 
             failure = OpenDirectoryChain(
                 item.DestinationDirectory,
+                GetLexicalRoot(pathPolicy, item.DestinationDirectory),
                 item.DestinationDirectory,
                 item.DestinationDirectoryPhysicalIdentity,
                 item,
@@ -289,6 +291,7 @@ public sealed class WindowsPhysicalMoveAdapter : IMoveOperationPort
 
     private static MoveLeaseAcquisition? OpenDirectoryChain(
         CanonicalPath finalDirectory,
+        CanonicalPath firstDirectory,
         CanonicalPath identityPath,
         PhysicalEntryIdentity expectedIdentity,
         ExecutionManifestItem item,
@@ -305,7 +308,7 @@ public sealed class WindowsPhysicalMoveAdapter : IMoveOperationPort
         while (current is not null)
         {
             reverse.Push(current);
-            if (policy.AreEquivalent(current, identityPath))
+            if (policy.AreEquivalent(current, firstDirectory))
             {
                 break;
             }
@@ -399,6 +402,19 @@ public sealed class WindowsPhysicalMoveAdapter : IMoveOperationPort
         }
 
         return null;
+    }
+
+    private static CanonicalPath GetLexicalRoot(
+        PathPolicy policy,
+        CanonicalPath path)
+    {
+        CanonicalPath root = path;
+        while (policy.GetParent(root) is { } parent)
+        {
+            root = parent;
+        }
+
+        return root;
     }
 
     private static MoveLeaseAcquisition? ValidateSourceObservation(
