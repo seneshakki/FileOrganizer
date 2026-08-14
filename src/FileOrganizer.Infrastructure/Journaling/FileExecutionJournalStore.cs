@@ -186,20 +186,39 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
             string staging = ContainedPath($".{manifest.Fingerprint.Value}.{Guid.NewGuid():N}.staging");
             string finalDirectory = ExecutionDirectory(manifest.Fingerprint);
             StoredJournalGenesis requestedGenesis = CreateGenesis(manifest, startRecord);
-            Directory.CreateDirectory(staging);
             bool published = false;
             try
             {
-                _publisher.PublishFile(
-                    staging,
-                    ManifestFileName,
-                    JournalStorageCodec.EncodeGenesis(requestedGenesis));
-                cancellationToken.ThrowIfCancellationRequested();
-                _publisher.PublishDirectory(staging, finalDirectory);
-                published = true;
-                return new JournalBeginResult(
-                    JournalBeginStatus.Begun,
-                    requestedGenesis.ToSnapshot());
+                try
+                {
+                    Directory.CreateDirectory(staging);
+                    _publisher.PublishFile(
+                        staging,
+                        ManifestFileName,
+                        JournalStorageCodec.EncodeGenesis(requestedGenesis));
+                    cancellationToken.ThrowIfCancellationRequested();
+                    _publisher.PublishDirectory(staging, finalDirectory);
+                    published = true;
+                    return new JournalBeginResult(
+                        JournalBeginStatus.Begun,
+                        requestedGenesis.ToSnapshot());
+                }
+                catch (Exception exception) when (IsExpectedPersistenceFailure(exception))
+                {
+                    JournalLoadResult afterFailure = LoadDetailedUnderGate(
+                        manifest.Fingerprint,
+                        CancellationToken.None);
+                    if (afterFailure.Status == JournalLoadStatus.Loaded)
+                    {
+                        return new JournalBeginResult(
+                            JournalBeginStatus.AlreadyExists,
+                            afterFailure.Snapshot!);
+                    }
+
+                    return afterFailure.Status == JournalLoadStatus.Invalid
+                        ? InvalidBegin(manifest.Fingerprint, afterFailure)
+                        : JournalBeginResult.PersistenceFailure();
+                }
             }
             finally
             {
@@ -226,7 +245,7 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
             JournalLoadResult load = LoadDetailedUnderGate(record.Fingerprint, cancellationToken);
             if (!load.Succeeded)
             {
-                throw new JournalStoreException(load);
+                return JournalPublishResult.InvalidJournal();
             }
 
             ExecutionJournalSnapshot snapshot = load.Snapshot!;
@@ -254,10 +273,19 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
                     snapshot.Manifest,
                     snapshot.Records.Append(record)));
 
-            StoredJournalRecord previous = ReadStoredRecordForSequence(
-                record.Fingerprint,
-                record.Sequence - 1,
-                cancellationToken);
+            StoredJournalRecord previous;
+            try
+            {
+                previous = ReadStoredRecordForSequence(
+                    record.Fingerprint,
+                    record.Sequence - 1,
+                    cancellationToken);
+            }
+            catch (Exception exception) when (IsInvalidStoredRecordFailure(exception))
+            {
+                return JournalPublishResult.InvalidJournal();
+            }
+
             StoredJournalRecord stored = JournalCanonicalHash.CreateRecord(
                 StoredJournalRecordPayload.From(record, previous.PayloadHash));
             string directory = ExecutionDirectory(record.Fingerprint);
@@ -269,18 +297,26 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
                     RecordFileName(record.Sequence),
                     JournalStorageCodec.EncodeRecord(stored));
             }
-            catch (IOException) when (File.Exists(Path.Combine(directory, RecordFileName(record.Sequence))))
+            catch (Exception exception) when (IsExpectedPersistenceFailure(exception))
             {
-                JournalLoadResult raced = LoadDetailedUnderGate(record.Fingerprint, cancellationToken);
+                JournalLoadResult raced = LoadDetailedUnderGate(
+                    record.Fingerprint,
+                    CancellationToken.None);
                 if (!raced.Succeeded)
                 {
-                    throw new JournalStoreException(raced);
+                    return JournalPublishResult.InvalidJournal();
                 }
 
-                ExecutionJournalRecord existing = raced.Snapshot!.Records[checked((int)record.Sequence)];
-                return existing.Equals(record)
-                    ? JournalPublishResult.AlreadyPublished(existing)
-                    : JournalPublishResult.SequenceConflict(existing);
+                if (record.Sequence < raced.Snapshot!.Records.Count)
+                {
+                    ExecutionJournalRecord existing =
+                        raced.Snapshot.Records[checked((int)record.Sequence)];
+                    return existing.Equals(record)
+                        ? JournalPublishResult.AlreadyPublished(existing)
+                        : JournalPublishResult.SequenceConflict(existing);
+                }
+
+                return JournalPublishResult.PersistenceFailure();
             }
 
             return JournalPublishResult.Published();
@@ -832,6 +868,18 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
 
         return JournalBeginResult.InvalidExistingJournal(fingerprint, mapped.Problems);
     }
+
+    private static bool IsExpectedPersistenceFailure(Exception exception) =>
+        exception is IOException or UnauthorizedAccessException;
+
+    private static bool IsInvalidStoredRecordFailure(Exception exception) =>
+        exception is IOException
+            or UnauthorizedAccessException
+            or JsonException
+            or NotSupportedException
+            or ArgumentException
+            or FormatException
+            or OverflowException;
 
     private static ExecutionJournalReadProblemKind MapProblemKind(
         JournalLoadProblemKind kind) => kind switch

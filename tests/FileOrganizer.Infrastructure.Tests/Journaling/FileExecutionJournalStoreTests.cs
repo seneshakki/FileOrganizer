@@ -709,22 +709,157 @@ public sealed class FileExecutionJournalStoreTests
         Assert.Empty(Directory.GetFiles(directory, ".*.tmp"));
     }
 
-    [Fact]
-    public async Task FailedGenesisDirectoryPublicationCleansOnlyUnpublishedStaging()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FailedGenesisDirectoryPublicationReturnsStructuredFailureAndCleansStaging(
+        bool unauthorized)
     {
         using TemporaryDirectory temp = TemporaryDirectory.Create();
         string root = Path.Combine(temp.FullPath, "journal");
-        FileExecutionJournalStore store = new(root, new FailingDirectoryPublisher());
+        FileExecutionJournalStore store = new(
+            root,
+            new FailingDirectoryPublisher(unauthorized, publishBeforeThrow: false));
         ExecutionManifest manifest = JournalStoreTestManifest.Create();
 
-        await Assert.ThrowsAsync<IOException>(
-            () => store.BeginAsync(
-                manifest,
-                Start(manifest),
-                TestContext.Current.CancellationToken).AsTask());
+        JournalBeginResult result = await store.BeginAsync(
+            manifest,
+            Start(manifest),
+            TestContext.Current.CancellationToken);
 
+        Assert.Equal(JournalBeginStatus.PersistenceFailure, result.Status);
         Assert.Empty(Directory.GetDirectories(root));
         Assert.False(Directory.Exists(Path.Combine(root, manifest.Fingerprint.Value)));
+    }
+
+    [Fact]
+    public async Task GenesisPublishedBeforeIOExceptionIsReconciledAsExisting()
+    {
+        using TemporaryDirectory temp = TemporaryDirectory.Create();
+        string root = Path.Combine(temp.FullPath, "journal");
+        FileExecutionJournalStore store = new(
+            root,
+            new FailingDirectoryPublisher(
+                unauthorized: false,
+                publishBeforeThrow: true));
+        ExecutionManifest manifest = JournalStoreTestManifest.Create();
+        ExecutionJournalRecord start = Start(manifest);
+
+        JournalBeginResult result = await store.BeginAsync(
+            manifest,
+            start,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(JournalBeginStatus.AlreadyExists, result.Status);
+        Assert.Equal([start], Assert.IsType<ExecutionJournalSnapshot>(result.Snapshot).Records);
+        Assert.Single(Directory.GetDirectories(root));
+        Assert.DoesNotContain(
+            Directory.GetDirectories(root),
+            path => Path.GetFileName(path).EndsWith(".staging", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FailedRecordPublicationReturnsStructuredFailureWithoutARecord(
+        bool unauthorized)
+    {
+        using TemporaryDirectory temp = TemporaryDirectory.Create();
+        string root = Path.Combine(temp.FullPath, "journal");
+        FileExecutionJournalStore store = new(
+            root,
+            new FailingRecordPublisher(unauthorized, publishBeforeThrow: false));
+        ExecutionManifest manifest = JournalStoreTestManifest.Create();
+        ExecutionJournalRecord start = Start(manifest);
+        ExecutionJournalRecord intent = Intent(manifest, StartedAt.AddSeconds(1));
+        await store.BeginAsync(manifest, start, TestContext.Current.CancellationToken);
+
+        JournalPublishResult result = await store.PublishAsync(
+            intent,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(JournalPublishStatus.PersistenceFailure, result.Status);
+        ExecutionJournalSnapshot snapshot = Assert.IsType<ExecutionJournalSnapshot>(
+            await store.ReadAsync(manifest.Fingerprint, TestContext.Current.CancellationToken));
+        Assert.Equal([start], snapshot.Records);
+        Assert.DoesNotContain(
+            Directory.GetFiles(Path.Combine(root, manifest.Fingerprint.Value)),
+            path => Path.GetFileName(path).EndsWith(".record.json", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task RecordPublishedBeforeIOExceptionIsIdempotentlyObserved()
+    {
+        using TemporaryDirectory temp = TemporaryDirectory.Create();
+        string root = Path.Combine(temp.FullPath, "journal");
+        FileExecutionJournalStore store = new(
+            root,
+            new FailingRecordPublisher(
+                unauthorized: false,
+                publishBeforeThrow: true));
+        ExecutionManifest manifest = JournalStoreTestManifest.Create();
+        ExecutionJournalRecord start = Start(manifest);
+        ExecutionJournalRecord intent = Intent(manifest, StartedAt.AddSeconds(1));
+        await store.BeginAsync(manifest, start, TestContext.Current.CancellationToken);
+
+        JournalPublishResult first = await store.PublishAsync(
+            intent,
+            TestContext.Current.CancellationToken);
+        JournalPublishResult second = await store.PublishAsync(
+            intent,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(JournalPublishStatus.AlreadyPublished, first.Status);
+        Assert.Equal(JournalPublishStatus.AlreadyPublished, second.Status);
+        Assert.Equal(intent, first.ExistingRecord);
+        Assert.Equal(intent, second.ExistingRecord);
+        Assert.Equal(
+            [start, intent],
+            (await store.ReadAsync(
+                manifest.Fingerprint,
+                TestContext.Current.CancellationToken))!.Records);
+    }
+
+    [Fact]
+    public async Task CorruptJournalReturnsInvalidPublishWithoutAttemptingAWrite()
+    {
+        using TemporaryDirectory temp = TemporaryDirectory.Create();
+        string root = Path.Combine(temp.FullPath, "journal");
+        FileExecutionJournalStore store = new(root);
+        ExecutionManifest manifest = JournalStoreTestManifest.Create();
+        await store.BeginAsync(
+            manifest,
+            Start(manifest),
+            TestContext.Current.CancellationToken);
+        string manifestPath = Path.Combine(root, manifest.Fingerprint.Value, "manifest.json");
+        File.WriteAllText(manifestPath, "not-json");
+
+        JournalPublishResult result = await store.PublishAsync(
+            Intent(manifest, StartedAt.AddSeconds(1)),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(JournalPublishStatus.InvalidJournal, result.Status);
+        Assert.Equal("not-json", File.ReadAllText(manifestPath));
+        Assert.Single(Directory.GetFiles(Path.GetDirectoryName(manifestPath)!));
+    }
+
+    [Fact]
+    public async Task UnexpectedPublisherFailureIsNotDisguisedAsPersistenceFailure()
+    {
+        using TemporaryDirectory temp = TemporaryDirectory.Create();
+        FileExecutionJournalStore store = new(
+            Path.Combine(temp.FullPath, "journal"),
+            new UnexpectedRecordFailurePublisher());
+        ExecutionManifest manifest = JournalStoreTestManifest.Create();
+        await store.BeginAsync(
+            manifest,
+            Start(manifest),
+            TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => store.PublishAsync(
+                Intent(manifest, StartedAt.AddSeconds(1)),
+                TestContext.Current.CancellationToken).AsTask());
     }
 
     private static ExecutionJournalRecord Start(ExecutionManifest manifest) =>
@@ -787,7 +922,9 @@ public sealed class FileExecutionJournalStoreTests
         JournalStorageCodec.DecodeGenesis(
             File.ReadAllBytes(Path.Combine(executionDirectory, "manifest.json")));
 
-    private sealed class FailingDirectoryPublisher : IJournalFilePublisher
+    private sealed class FailingDirectoryPublisher(
+        bool unauthorized,
+        bool publishBeforeThrow) : IJournalFilePublisher
     {
         private readonly DurableJournalFilePublisher _inner = new();
 
@@ -797,7 +934,67 @@ public sealed class FileExecutionJournalStoreTests
             ReadOnlySpan<byte> content) =>
             _inner.PublishFile(directory, finalFileName, content);
 
-        public void PublishDirectory(string stagingDirectory, string finalDirectory) =>
-            throw new IOException("Injected directory publication failure.");
+        public void PublishDirectory(string stagingDirectory, string finalDirectory)
+        {
+            if (publishBeforeThrow)
+            {
+                _inner.PublishDirectory(stagingDirectory, finalDirectory);
+            }
+
+            throw Failure(unauthorized, "Injected directory publication failure.");
+        }
     }
+
+    private sealed class FailingRecordPublisher(
+        bool unauthorized,
+        bool publishBeforeThrow) : IJournalFilePublisher
+    {
+        private readonly DurableJournalFilePublisher _inner = new();
+
+        public void PublishFile(
+            string directory,
+            string finalFileName,
+            ReadOnlySpan<byte> content)
+        {
+            if (!finalFileName.EndsWith(".record.json", StringComparison.Ordinal))
+            {
+                _inner.PublishFile(directory, finalFileName, content);
+                return;
+            }
+
+            if (publishBeforeThrow)
+            {
+                _inner.PublishFile(directory, finalFileName, content);
+            }
+
+            throw Failure(unauthorized, "Injected record publication failure.");
+        }
+
+        public void PublishDirectory(string stagingDirectory, string finalDirectory) =>
+            _inner.PublishDirectory(stagingDirectory, finalDirectory);
+    }
+
+    private sealed class UnexpectedRecordFailurePublisher : IJournalFilePublisher
+    {
+        private readonly DurableJournalFilePublisher _inner = new();
+
+        public void PublishFile(
+            string directory,
+            string finalFileName,
+            ReadOnlySpan<byte> content)
+        {
+            if (finalFileName.EndsWith(".record.json", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Injected unexpected publication failure.");
+            }
+
+            _inner.PublishFile(directory, finalFileName, content);
+        }
+
+        public void PublishDirectory(string stagingDirectory, string finalDirectory) =>
+            _inner.PublishDirectory(stagingDirectory, finalDirectory);
+    }
+
+    private static Exception Failure(bool unauthorized, string message) =>
+        unauthorized ? new UnauthorizedAccessException(message) : new IOException(message);
 }
