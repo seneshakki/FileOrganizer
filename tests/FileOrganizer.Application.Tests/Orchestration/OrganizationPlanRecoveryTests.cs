@@ -199,7 +199,7 @@ public sealed class OrganizationPlanRecoveryTests
     }
 
     [Fact]
-    public async Task CancellationAfterRecoveryObservationDoesNotPublishAResolution()
+    public async Task CancellationAfterRecoveryObservationPublishesTheKnownResolution()
     {
         OrganizationPlan plan = Plan();
         Harness context = new();
@@ -207,19 +207,133 @@ public sealed class OrganizationPlanRecoveryTests
             context,
             plan,
             afterStateChange: false);
-        int records = context.Journal.Records(fingerprint).Count;
         using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
             TestContext.Current.CancellationToken);
         context.Moves[0].OnRecoveryObserved = cancellation.Cancel;
 
-        await Assert.ThrowsAsync<OperationCanceledException>(
-            () => context.Executor.RecoverAsync(fingerprint, cancellation.Token).AsTask());
+        ExecutionRecoveryResult result = await context.Executor.RecoverAsync(
+            fingerprint,
+            cancellation.Token);
 
+        Assert.Equal(ExecutionRecoveryOutcome.Resumable, result.Outcome);
+        Assert.Equal(RecoveryDisposition.NotApplied, result.Resolution?.Disposition);
+        Assert.True(result.JournalWasUpdated);
         Assert.Equal([0], context.Moves.RecoveryObservedOrdinals);
-        Assert.Equal(records, context.Journal.Records(fingerprint).Count);
+        Assert.Equal(
+            ExecutionJournalRecordKind.MoveNotApplied,
+            context.Journal.Records(fingerprint)[^1].Kind);
+        Assert.Equal(
+            JournalRecordReasonKind.RecoveryConfirmedNotApplied,
+            context.Journal.Records(fingerprint)[^1].Reason);
+        Assert.Equal(2, context.GlobalLease.DisposeCount);
+        Assert.False(context.GlobalLease.IsOwned);
+    }
+
+    [Fact]
+    public async Task RecoveryResolutionPersistenceFailureReturnsStructuredRecoveryRequired()
+    {
+        OrganizationPlan plan = Plan();
+        Harness context = new();
+        PlanFingerprint fingerprint = await LeavePendingIntentAsync(
+            context,
+            plan,
+            afterStateChange: false);
+        context.Journal.PublishOverride = record =>
+            record.Kind == ExecutionJournalRecordKind.MoveNotApplied
+                ? JournalPublishResult.PersistenceFailure()
+                : null;
+
+        ExecutionRecoveryResult result = await context.RecoverAsync(fingerprint);
+
+        Assert.Equal(ExecutionRecoveryOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(RecoveryDisposition.NotApplied, result.Resolution?.Disposition);
+        Assert.Equal(0, result.NextOperationOrdinal);
+        Assert.False(result.JournalWasUpdated);
+        Assert.Equal(
+            [ExecutionProblemKind.JournalFailure, ExecutionProblemKind.RecoveryRequired],
+            result.Problems.Select(problem => problem.Kind));
         Assert.Equal(
             ExecutionJournalRecordKind.MoveIntent,
             context.Journal.Records(fingerprint)[^1].Kind);
+        Assert.Equal(2, context.GlobalLease.DisposeCount);
+        Assert.False(context.GlobalLease.IsOwned);
+    }
+
+    [Fact]
+    public async Task InvalidJournalStatusWhilePublishingRecoveryResolutionIsStructured()
+    {
+        OrganizationPlan plan = Plan();
+        Harness context = new();
+        PlanFingerprint fingerprint = await LeavePendingIntentAsync(
+            context,
+            plan,
+            afterStateChange: false);
+        context.Journal.PublishOverride = record =>
+            record.Kind == ExecutionJournalRecordKind.MoveNotApplied
+                ? JournalPublishResult.InvalidJournal()
+                : null;
+
+        ExecutionRecoveryResult result = await context.RecoverAsync(fingerprint);
+
+        Assert.Equal(ExecutionRecoveryOutcome.InvalidJournal, result.Outcome);
+        Assert.Null(result.Resolution);
+        Assert.Null(result.NextOperationOrdinal);
+        Assert.False(result.JournalWasUpdated);
+        Assert.Equal(ExecutionProblemKind.InvalidJournal, Assert.Single(result.Problems).Kind);
+        Assert.Equal(
+            ExecutionJournalRecordKind.MoveIntent,
+            context.Journal.Records(fingerprint)[^1].Kind);
+        Assert.Equal(2, context.GlobalLease.DisposeCount);
+        Assert.False(context.GlobalLease.IsOwned);
+    }
+
+    [Fact]
+    public async Task TerminalRecoveryPublicationFailureNeverClaimsDurableCompletion()
+    {
+        OrganizationPlan plan = Plan();
+        ExecutionManifest manifest = Compile(plan);
+        Harness context = new();
+        context.Journal.Seed(
+            manifest,
+            [
+                ExecutionJournalRecord.ExecutionStarted(
+                    TestExecutionRuns.Id,
+                    manifest.Fingerprint,
+                    0,
+                    ExecutionTime),
+                ExecutionJournalRecord.MoveIntent(
+                    TestExecutionRuns.Id,
+                    manifest.Fingerprint,
+                    1,
+                    ExecutionTime.AddSeconds(1),
+                    0,
+                    manifest.Items[0].SourcePrecondition.PhysicalIdentity!),
+                ExecutionJournalRecord.MoveApplied(
+                    TestExecutionRuns.Id,
+                    manifest.Fingerprint,
+                    2,
+                    ExecutionTime.AddSeconds(2),
+                    0),
+            ]);
+        context.Journal.PublishOverride = record =>
+            record.Kind == ExecutionJournalRecordKind.ExecutionCompleted
+                ? JournalPublishResult.PersistenceFailure()
+                : null;
+
+        ExecutionRecoveryResult result = await context.RecoverAsync(manifest.Fingerprint);
+
+        Assert.Equal(ExecutionRecoveryOutcome.RecoveryRequired, result.Outcome);
+        Assert.Null(result.Resolution);
+        Assert.Null(result.NextOperationOrdinal);
+        Assert.False(result.JournalWasUpdated);
+        Assert.Equal(
+            [ExecutionProblemKind.JournalFailure, ExecutionProblemKind.RecoveryRequired],
+            result.Problems.Select(problem => problem.Kind));
+        Assert.Equal(
+            ExecutionJournalRecordKind.MoveApplied,
+            context.Journal.Records(manifest.Fingerprint)[^1].Kind);
+        Assert.Equal(1, context.GlobalLease.DisposeCount);
+        Assert.False(context.GlobalLease.IsOwned);
     }
 
     [Fact]

@@ -17,6 +17,7 @@ internal sealed class FakeGlobalExecutionLeaseProvider : IGlobalExecutionLeasePr
 {
     private object? _owner;
     private int _acquisitionCount;
+    private int _disposeCount;
 
     internal GlobalExecutionLeaseAcquisitionStatus NextStatus { get; set; } =
         GlobalExecutionLeaseAcquisitionStatus.Acquired;
@@ -27,6 +28,8 @@ internal sealed class FakeGlobalExecutionLeaseProvider : IGlobalExecutionLeasePr
     internal bool PreviousOwnerAbandoned { get; set; }
 
     internal int AcquisitionCount => Volatile.Read(ref _acquisitionCount);
+
+    internal int DisposeCount => Volatile.Read(ref _disposeCount);
 
     internal bool IsOwned => Volatile.Read(ref _owner) is not null;
 
@@ -72,6 +75,8 @@ internal sealed class FakeGlobalExecutionLeaseProvider : IGlobalExecutionLeasePr
     private void Release(object owner) =>
         Interlocked.CompareExchange(ref _owner, null, owner);
 
+    private void RecordDisposal() => Interlocked.Increment(ref _disposeCount);
+
     private sealed class Lease(
         FakeGlobalExecutionLeaseProvider provider,
         object owner) : IGlobalExecutionLease
@@ -80,6 +85,7 @@ internal sealed class FakeGlobalExecutionLeaseProvider : IGlobalExecutionLeasePr
 
         public ValueTask DisposeAsync()
         {
+            provider.RecordDisposal();
             if (Interlocked.Exchange(ref _disposed, 1) == 0)
             {
                 provider.Release(owner);
@@ -327,6 +333,8 @@ internal sealed class ScriptedMovePort : IMoveOperationPort, IRecoveryObservatio
 
     internal List<int> ObservedOrdinals { get; } = [];
 
+    internal List<int> DisposedOrdinals { get; } = [];
+
     internal List<int> RecoveryObservedOrdinals { get; } = [];
 
     internal List<IGlobalExecutionLease> AcquisitionExecutionLeases { get; } = [];
@@ -417,10 +425,16 @@ internal sealed class ScriptedMovePort : IMoveOperationPort, IRecoveryObservatio
         public ValueTask<MoveObservation> ObserveAsync()
         {
             owner.ObservedOrdinals.Add(step.Ordinal);
+            step.OnObserved?.Invoke();
             return ValueTask.FromResult(step.CurrentObservation);
         }
 
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public ValueTask DisposeAsync()
+        {
+            owner.DisposedOrdinals.Add(step.Ordinal);
+            step.OnDisposed?.Invoke();
+            return ValueTask.CompletedTask;
+        }
     }
 }
 
@@ -457,6 +471,10 @@ internal sealed class ScriptedMoveStep
     internal Exception? FaultAfterStateChange { get; set; }
 
     internal Action? OnCommitted { get; set; }
+
+    internal Action? OnObserved { get; set; }
+
+    internal Action? OnDisposed { get; set; }
 
     internal Action? OnRecoveryObserved { get; set; }
 

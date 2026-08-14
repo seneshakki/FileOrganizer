@@ -276,16 +276,35 @@ public sealed class ExecutionRecoveryResult
                 break;
 
             case ExecutionRecoveryOutcome.RecoveryRequired:
+                bool hasJournalFailure = problems.Any(
+                    static problem => problem.Kind == ExecutionProblemKind.JournalFailure);
+                bool hasRecoveryRequired = problems.Any(
+                    static problem => problem.Kind == ExecutionProblemKind.RecoveryRequired);
+                bool isPendingIntent = nextOperationOrdinal is not null
+                    && resolution is null
+                    && !hasJournalFailure;
+                bool isOutcomePublicationFailure = nextOperationOrdinal is not null
+                    && resolution is not null
+                    && hasJournalFailure;
+                bool isTerminalPublicationFailure = nextOperationOrdinal is null
+                    && resolution is null
+                    && hasJournalFailure;
                 if (manifest is null
-                    || resolution is not null
-                    || nextOperationOrdinal is null
                     || journalWasUpdated
-                    || problems.Length == 0
+                    || !hasRecoveryRequired
                     || problems.Any(
-                        problem => problem.Kind != ExecutionProblemKind.RecoveryRequired))
+                        static problem => problem.Kind is not (
+                            ExecutionProblemKind.JournalFailure
+                            or ExecutionProblemKind.RecoveryRequired))
+                    || problems.Any(
+                        problem => problem.OperationOrdinal is not null
+                            && problem.OperationOrdinal != nextOperationOrdinal)
+                    || !(isPendingIntent
+                        || isOutcomePublicationFailure
+                        || isTerminalPublicationFailure))
                 {
                     throw new ArgumentException(
-                        "Pending-intent recovery requires a manifest, affected ordinal, and recovery-required problem.",
+                        "Recovery-required state must describe a pending intent or an uncertain outcome/terminal publication.",
                         nameof(outcome));
                 }
 

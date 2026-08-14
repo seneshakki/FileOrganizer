@@ -52,6 +52,40 @@ public sealed class OrganizationPlanExecutorTests
     }
 
     [Fact]
+    public async Task GlobalLeaseSpansEveryDurabilityAndPhysicalBoundaryAndDisposesOnce()
+    {
+        OrganizationPlan plan = Plan(2);
+        Harness context = new();
+        int journalBoundariesWhileOwned = 0;
+        context.Preflight.Handler = (manifest, _) =>
+        {
+            Assert.True(context.GlobalLease.IsOwned);
+            return new ExecutionPreflightResult(
+                manifest.Items.Select(item =>
+                    ExecutionPreflightItemResult.Ready(item.Ordinal)));
+        };
+        context.Journal.OnBoundary = _ =>
+        {
+            Assert.True(context.GlobalLease.IsOwned);
+            journalBoundariesWhileOwned++;
+        };
+        for (int ordinal = 0; ordinal < 2; ordinal++)
+        {
+            context.Moves[ordinal].OnCommitted = () => Assert.True(context.GlobalLease.IsOwned);
+            context.Moves[ordinal].OnObserved = () => Assert.True(context.GlobalLease.IsOwned);
+            context.Moves[ordinal].OnDisposed = () => Assert.True(context.GlobalLease.IsOwned);
+        }
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.Completed, result.Outcome);
+        Assert.Equal(12, journalBoundariesWhileOwned);
+        Assert.Equal([0, 1], context.Moves.DisposedOrdinals);
+        Assert.Equal(1, context.GlobalLease.DisposeCount);
+        Assert.False(context.GlobalLease.IsOwned);
+    }
+
+    [Fact]
     public async Task WholePlanPreflightReportsEveryFailureBeforeStartingAJournal()
     {
         OrganizationPlan plan = Plan(3);
@@ -325,6 +359,32 @@ public sealed class OrganizationPlanExecutorTests
     }
 
     [Fact]
+    public async Task ReconciledTargetIdentityOverridesAReportedNativeFailureAsApplied()
+    {
+        OrganizationPlan plan = Plan(1);
+        Harness context = new();
+        context.Moves[0].AttemptResult = MoveAttemptResult.Failure(
+            Problem(
+                ExecutionProblemKind.MoveFailed,
+                "The native call reported failure before reconciliation.",
+                0));
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.Completed, result.Outcome);
+        Assert.Equal(ExecutionItemOutcome.Applied, Assert.Single(result.Items).Outcome);
+        Assert.Empty(result.Problems);
+        Assert.Equal(
+            [
+                ExecutionJournalRecordKind.ExecutionStarted,
+                ExecutionJournalRecordKind.MoveIntent,
+                ExecutionJournalRecordKind.MoveApplied,
+                ExecutionJournalRecordKind.ExecutionCompleted,
+            ],
+            context.Journal.Records(result.Fingerprint!).Select(record => record.Kind));
+    }
+
+    [Fact]
     public async Task FailedPostMoveInspectionOverridesReportedSuccessAsAmbiguous()
     {
         OrganizationPlan plan = Plan(1);
@@ -394,6 +454,25 @@ public sealed class OrganizationPlanExecutorTests
     }
 
     [Fact]
+    public async Task CancellationBeforeLeaseAcquisitionTouchesNoExecutionPort()
+    {
+        OrganizationPlan plan = Plan(1);
+        Harness context = new();
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        cancellation.Cancel();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => context.Executor.ExecuteAsync(plan, cancellation.Token).AsTask());
+
+        Assert.Equal(0, context.GlobalLease.AcquisitionCount);
+        Assert.Equal(0, context.GlobalLease.DisposeCount);
+        Assert.Equal(0, context.Journal.ReadCount);
+        Assert.Equal(0, context.Preflight.CallCount);
+        Assert.Empty(context.Moves.AcquiredOrdinals);
+    }
+
+    [Fact]
     public async Task CancellationBeforeJournalCreationUsesNormalCancellationSemantics()
     {
         OrganizationPlan plan = Plan(1);
@@ -419,6 +498,9 @@ public sealed class OrganizationPlanExecutorTests
 
         Assert.Equal(0, context.Journal.BeginCount);
         Assert.Empty(context.Moves.CommittedOrdinals);
+        Assert.Equal(1, context.GlobalLease.AcquisitionCount);
+        Assert.Equal(1, context.GlobalLease.DisposeCount);
+        Assert.False(context.GlobalLease.IsOwned);
     }
 
     [Fact]
@@ -444,6 +526,8 @@ public sealed class OrganizationPlanExecutorTests
         Assert.Equal(
             [ExecutionJournalRecordKind.ExecutionStarted, ExecutionJournalRecordKind.ExecutionInterrupted],
             context.Journal.Records(result.Fingerprint!).Select(record => record.Kind));
+        Assert.Equal(1, context.GlobalLease.DisposeCount);
+        Assert.False(context.GlobalLease.IsOwned);
     }
 
     [Fact]
@@ -580,6 +664,42 @@ public sealed class OrganizationPlanExecutorTests
         Assert.DoesNotContain(
             context.Journal.Records(result.Fingerprint!),
             record => record.Kind == ExecutionJournalRecordKind.ExecutionCompleted);
+    }
+
+    [Fact]
+    public async Task CancellationAfterDurableFinalOutcomePreventsTerminalCompletion()
+    {
+        OrganizationPlan plan = Plan(1);
+        Harness context = new();
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        context.Journal.OnBoundary = boundary =>
+        {
+            if (boundary is
+                {
+                    Boundary: JournalFaultBoundary.AfterPublish,
+                    Record.Kind: ExecutionJournalRecordKind.MoveApplied,
+                })
+            {
+                cancellation.Cancel();
+            }
+        };
+
+        ExecutionResult result = await context.Executor.ExecuteAsync(plan, cancellation.Token);
+
+        Assert.Equal(ExecutionOutcome.Interrupted, result.Outcome);
+        Assert.Equal(ExecutionItemOutcome.Applied, Assert.Single(result.Items).Outcome);
+        Assert.Equal(
+            [
+                ExecutionJournalRecordKind.ExecutionStarted,
+                ExecutionJournalRecordKind.MoveIntent,
+                ExecutionJournalRecordKind.MoveApplied,
+                ExecutionJournalRecordKind.ExecutionInterrupted,
+            ],
+            context.Journal.Records(result.Fingerprint!).Select(record => record.Kind));
+        Assert.Single(context.Moves.CommittedOrdinals);
+        Assert.Equal([0], context.Moves.DisposedOrdinals);
+        Assert.Equal(1, context.GlobalLease.DisposeCount);
     }
 
     [Theory]
@@ -795,6 +915,59 @@ public sealed class OrganizationPlanExecutorTests
     }
 
     [Fact]
+    public async Task CrashImmediatelyAfterDurableIntentNeverCommitsPendingOperation()
+    {
+        OrganizationPlan plan = Plan(4);
+        Harness context = new();
+        context.Journal.OnBoundary = boundary =>
+        {
+            if (boundary is
+                {
+                    Boundary: JournalFaultBoundary.AfterPublish,
+                    Record.Kind: ExecutionJournalRecordKind.MoveIntent,
+                    Record.OperationOrdinal: 2,
+                })
+            {
+                throw new SimulatedCrashException("Crash immediately after durable intent.");
+            }
+        };
+
+        await Assert.ThrowsAsync<SimulatedCrashException>(
+            () => context.ExecuteAsync(plan).AsTask());
+
+        PlanFingerprint fingerprint = Compile(plan).Fingerprint;
+        Assert.Equal(
+            [
+                ExecutionJournalRecordKind.ExecutionStarted,
+                ExecutionJournalRecordKind.MoveIntent,
+                ExecutionJournalRecordKind.MoveApplied,
+                ExecutionJournalRecordKind.MoveIntent,
+                ExecutionJournalRecordKind.MoveApplied,
+                ExecutionJournalRecordKind.MoveIntent,
+            ],
+            context.Journal.Records(fingerprint).Select(record => record.Kind));
+        Assert.Equal([0, 1], context.Moves.CommittedOrdinals);
+        Assert.Equal([0, 1, 2], context.Moves.DisposedOrdinals);
+        Assert.Equal(1, context.GlobalLease.DisposeCount);
+
+        context.Journal.OnBoundary = null;
+        ExecutionResult retry = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.RecoveryRequired, retry.Outcome);
+        Assert.Equal(
+            [
+                ExecutionItemOutcome.Applied,
+                ExecutionItemOutcome.Applied,
+                ExecutionItemOutcome.Ambiguous,
+                ExecutionItemOutcome.NotAttempted,
+            ],
+            retry.Items.Select(item => item.Outcome));
+        Assert.Equal([0, 1], context.Moves.CommittedOrdinals);
+        Assert.Empty(context.Moves.RecoveryObservedOrdinals);
+        Assert.Equal(2, context.GlobalLease.DisposeCount);
+    }
+
+    [Fact]
     public async Task DurableAmbiguousOutcomeNeverAutoResumesExecution()
     {
         OrganizationPlan plan = Plan(1);
@@ -849,6 +1022,31 @@ public sealed class OrganizationPlanExecutorTests
         Assert.Empty(context.Moves.AcquiredOrdinals);
         Assert.Empty(context.Moves.CommittedOrdinals);
         Assert.Empty(context.Journal.Records(result.Fingerprint!));
+        Assert.Equal(1, context.GlobalLease.DisposeCount);
+        Assert.False(context.GlobalLease.IsOwned);
+    }
+
+    [Fact]
+    public async Task CrashBeforeGenesisPublicationLeavesNoJournalOrPhysicalAttempt()
+    {
+        OrganizationPlan plan = Plan(1);
+        Harness context = new();
+        context.Journal.OnBoundary = boundary =>
+        {
+            if (boundary.Boundary == JournalFaultBoundary.BeforeBegin)
+            {
+                throw new SimulatedCrashException("Crash before journal genesis publication.");
+            }
+        };
+
+        await Assert.ThrowsAsync<SimulatedCrashException>(
+            () => context.ExecuteAsync(plan).AsTask());
+
+        Assert.Empty(context.Journal.Records(Compile(plan).Fingerprint));
+        Assert.Empty(context.Moves.AcquiredOrdinals);
+        Assert.Empty(context.Moves.CommittedOrdinals);
+        Assert.Equal(1, context.GlobalLease.DisposeCount);
+        Assert.False(context.GlobalLease.IsOwned);
     }
 
     [Fact]
@@ -872,6 +1070,9 @@ public sealed class OrganizationPlanExecutorTests
         Assert.Equal(
             [ExecutionJournalRecordKind.ExecutionStarted],
             context.Journal.Records(result.Fingerprint!).Select(record => record.Kind));
+        Assert.Equal([0], context.Moves.DisposedOrdinals);
+        Assert.Equal(1, context.GlobalLease.DisposeCount);
+        Assert.False(context.GlobalLease.IsOwned);
     }
 
     [Fact]
@@ -1018,6 +1219,46 @@ public sealed class OrganizationPlanExecutorTests
     }
 
     [Fact]
+    public async Task CrashAfterAppliedBeforeOutcomePublicationLeavesIntentForReconciliation()
+    {
+        OrganizationPlan plan = Plan(2);
+        Harness context = new();
+        context.Journal.OnBoundary = boundary =>
+        {
+            if (boundary is
+                {
+                    Boundary: JournalFaultBoundary.BeforePublish,
+                    Record.Kind: ExecutionJournalRecordKind.MoveApplied,
+                })
+            {
+                throw new SimulatedCrashException(
+                    "Crash after physical Applied but before durable outcome.");
+            }
+        };
+
+        await Assert.ThrowsAsync<SimulatedCrashException>(
+            () => context.ExecuteAsync(plan).AsTask());
+
+        PlanFingerprint fingerprint = Compile(plan).Fingerprint;
+        Assert.Equal([0], context.Moves.CommittedOrdinals);
+        Assert.Equal([0], context.Moves.ObservedOrdinals);
+        Assert.Equal([0], context.Moves.DisposedOrdinals);
+        Assert.Equal(
+            [ExecutionJournalRecordKind.ExecutionStarted, ExecutionJournalRecordKind.MoveIntent],
+            context.Journal.Records(fingerprint).Select(record => record.Kind));
+
+        context.Journal.OnBoundary = null;
+        ExecutionResult retry = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.RecoveryRequired, retry.Outcome);
+        Assert.Equal(
+            [ExecutionItemOutcome.Ambiguous, ExecutionItemOutcome.NotAttempted],
+            retry.Items.Select(item => item.Outcome));
+        Assert.Equal([0], context.Moves.CommittedOrdinals);
+        Assert.Empty(context.Moves.RecoveryObservedOrdinals);
+    }
+
+    [Fact]
     public async Task PersistedOutcomeSurvivesAnAfterPublishCrashWithoutAnotherMove()
     {
         OrganizationPlan plan = Plan(1);
@@ -1041,6 +1282,89 @@ public sealed class OrganizationPlanExecutorTests
         Assert.Equal(ExecutionRecoveryOutcome.Completed, recovery.Outcome);
         Assert.Single(context.Moves.CommittedOrdinals);
         Assert.Empty(context.Moves.RecoveryObservedOrdinals);
+    }
+
+    [Fact]
+    public async Task CrashAfterDurableOutcomeBeforeNextItemPreservesAppliedPrefixWithoutRetry()
+    {
+        OrganizationPlan plan = Plan(3);
+        Harness context = new();
+        context.Journal.OnBoundary = boundary =>
+        {
+            if (boundary is
+                {
+                    Boundary: JournalFaultBoundary.AfterPublish,
+                    Record.Kind: ExecutionJournalRecordKind.MoveApplied,
+                    Record.OperationOrdinal: 0,
+                })
+            {
+                throw new SimulatedCrashException("Crash before the next operation.");
+            }
+        };
+
+        await Assert.ThrowsAsync<SimulatedCrashException>(
+            () => context.ExecuteAsync(plan).AsTask());
+        context.Journal.OnBoundary = null;
+        int commitsAfterCrash = context.Moves.CommittedOrdinals.Count;
+
+        ExecutionResult firstReplay = await context.ExecuteAsync(plan);
+        ExecutionResult secondReplay = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.RecoveryRequired, firstReplay.Outcome);
+        Assert.Equal(ExecutionOutcome.RecoveryRequired, secondReplay.Outcome);
+        Assert.Equal(
+            [
+                ExecutionItemOutcome.Applied,
+                ExecutionItemOutcome.NotAttempted,
+                ExecutionItemOutcome.NotAttempted,
+            ],
+            firstReplay.Items.Select(item => item.Outcome));
+        Assert.Equal(commitsAfterCrash, context.Moves.CommittedOrdinals.Count);
+        Assert.Equal([0], context.Moves.CommittedOrdinals);
+        Assert.Equal(
+            [
+                ExecutionJournalRecordKind.ExecutionStarted,
+                ExecutionJournalRecordKind.MoveIntent,
+                ExecutionJournalRecordKind.MoveApplied,
+            ],
+            context.Journal.Records(firstReplay.Fingerprint!).Select(record => record.Kind));
+    }
+
+    [Fact]
+    public async Task CrashAfterDurableTerminalReplaysCompletedWithoutAnyPhysicalCall()
+    {
+        OrganizationPlan plan = Plan(2);
+        Harness context = new();
+        context.Journal.OnBoundary = boundary =>
+        {
+            if (boundary is
+                {
+                    Boundary: JournalFaultBoundary.AfterPublish,
+                    Record.Kind: ExecutionJournalRecordKind.ExecutionCompleted,
+                })
+            {
+                throw new SimulatedCrashException("Crash after durable completion.");
+            }
+        };
+
+        await Assert.ThrowsAsync<SimulatedCrashException>(
+            () => context.ExecuteAsync(plan).AsTask());
+        context.Journal.OnBoundary = null;
+        int commitsAfterCrash = context.Moves.CommittedOrdinals.Count;
+        int preflightCallsAfterCrash = context.Preflight.CallCount;
+
+        ExecutionResult firstReplay = await context.ExecuteAsync(plan);
+        ExecutionResult secondReplay = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.Completed, firstReplay.Outcome);
+        Assert.Equal(ExecutionOutcome.Completed, secondReplay.Outcome);
+        Assert.True(firstReplay.WasReplayed);
+        Assert.True(secondReplay.WasReplayed);
+        Assert.Equal(commitsAfterCrash, context.Moves.CommittedOrdinals.Count);
+        Assert.Equal(preflightCallsAfterCrash, context.Preflight.CallCount);
+        Assert.Equal(
+            ExecutionJournalRecordKind.ExecutionCompleted,
+            context.Journal.Records(firstReplay.Fingerprint!)[^1].Kind);
     }
 
     [Fact]

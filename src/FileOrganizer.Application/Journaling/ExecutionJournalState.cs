@@ -49,7 +49,9 @@ public sealed class ExecutionJournalState
     /// Gets whether a future explicit-resume use case may safely continue this
     /// same journal. M3B-1 does not initiate that continuation automatically.
     /// </summary>
-    public bool CanResume => Status == ExecutionJournalStatus.Resumable;
+    public bool CanResume => Status is
+        ExecutionJournalStatus.InProgress or ExecutionJournalStatus.Resumable
+        && ActiveOperationOrdinal is null;
 
     /// <summary>
     /// Gets whether a journal implementation may allow a different fingerprint

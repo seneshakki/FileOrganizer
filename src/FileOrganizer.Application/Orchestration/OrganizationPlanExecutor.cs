@@ -579,7 +579,6 @@ public sealed class OrganizationPlanExecutor
                     fingerprint,
                     cancellationToken)
                 .ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
             if (read.Status == ExecutionJournalReadStatus.NotFound)
             {
                 return new ExecutionRecoveryResult(
@@ -647,12 +646,24 @@ public sealed class OrganizationPlanExecutor
 
             int ordinal = state.ActiveOperationOrdinal.Value;
             ExecutionManifestItem item = snapshot.Manifest.Items[ordinal];
-            MoveObservation observation = await _recoveryObservations.ObserveAsync(
-                    executionLease,
-                    item,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return PendingIntentRecoveryRequired(snapshot.Manifest, ordinal);
+            }
+
+            MoveObservation observation;
+            try
+            {
+                observation = await _recoveryObservations.ObserveAsync(
+                        executionLease,
+                        item,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return PendingIntentRecoveryRequired(snapshot.Manifest, ordinal);
+            }
 
             DateTimeOffset lastJournalTime = LastJournalTime(snapshot);
             RecoveryDecision decision = MoveRecoveryStateMachine.Decide(
@@ -664,7 +675,18 @@ public sealed class OrganizationPlanExecutor
             bool updated = false;
             if (decision.Record is not null)
             {
-                await PublishRecoveryRecordRequiredAsync(decision.Record).ConfigureAwait(false);
+                JournalPublicationOutcome publication =
+                    await TryPublishRequiredAsync(decision.Record).ConfigureAwait(false);
+                if (publication != JournalPublicationOutcome.Succeeded)
+                {
+                    return RecoveryPublicationFailureResult(
+                        snapshot.Manifest,
+                        ordinal,
+                        decision.Resolution,
+                        publication,
+                        "The reconciled recovery outcome could not be published durably.");
+                }
+
                 updated = true;
             }
 
@@ -693,14 +715,32 @@ public sealed class OrganizationPlanExecutor
                     manifest);
 
             case ExecutionJournalStatus.InProgress when nextOrdinal is null:
-                cancellationToken.ThrowIfCancellationRequested();
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return new ExecutionRecoveryResult(
+                        manifest.Fingerprint,
+                        ExecutionRecoveryOutcome.Resumable,
+                        manifest);
+                }
+
                 DateTimeOffset lastJournalTime = LastJournalTime(snapshot);
                 ExecutionJournalRecord completed = ExecutionJournalRecord.ExecutionCompleted(
                     snapshot.RunId,
                     manifest.Fingerprint,
                     state.NextSequence,
                     NextJournalTime(ref lastJournalTime));
-                await PublishRecoveryRecordRequiredAsync(completed).ConfigureAwait(false);
+                JournalPublicationOutcome publication =
+                    await TryPublishRequiredAsync(completed).ConfigureAwait(false);
+                if (publication != JournalPublicationOutcome.Succeeded)
+                {
+                    return RecoveryPublicationFailureResult(
+                        manifest,
+                        ordinal: null,
+                        resolution: null,
+                        publication,
+                        "The recovered completion record could not be published durably.");
+                }
+
                 return new ExecutionRecoveryResult(
                     manifest.Fingerprint,
                     ExecutionRecoveryOutcome.Completed,
@@ -1087,16 +1127,68 @@ public sealed class OrganizationPlanExecutor
         };
     }
 
-    private async ValueTask PublishRecoveryRecordRequiredAsync(
-        ExecutionJournalRecord record)
+    private static ExecutionRecoveryResult PendingIntentRecoveryRequired(
+        ExecutionManifest manifest,
+        int ordinal)
     {
-        JournalPublicationOutcome publication =
-            await TryPublishRequiredAsync(record).ConfigureAwait(false);
-        if (publication != JournalPublicationOutcome.Succeeded)
+        return new ExecutionRecoveryResult(
+            manifest.Fingerprint,
+            ExecutionRecoveryOutcome.RecoveryRequired,
+            manifest,
+            nextOperationOrdinal: ordinal,
+            problems:
+            [
+                new ExecutionProblem(
+                    ExecutionProblemKind.RecoveryRequired,
+                    "A durable move intent still requires physical reconciliation.",
+                    ordinal),
+            ]);
+    }
+
+    private static ExecutionRecoveryResult RecoveryPublicationFailureResult(
+        ExecutionManifest manifest,
+        int? ordinal,
+        RecoveryResolution? resolution,
+        JournalPublicationOutcome publication,
+        string description)
+    {
+        if (publication == JournalPublicationOutcome.InvalidJournal)
         {
-            throw new InvalidOperationException(
-                $"Journal sequence {record.Sequence} could not be published safely during recovery.");
+            return new ExecutionRecoveryResult(
+                manifest.Fingerprint,
+                ExecutionRecoveryOutcome.InvalidJournal,
+                manifest,
+                problems:
+                [
+                    new ExecutionProblem(
+                        ExecutionProblemKind.InvalidJournal,
+                        "The durable journal became invalid while publishing recovery state."),
+                ]);
         }
+
+        if (publication != JournalPublicationOutcome.PersistenceFailure)
+        {
+            throw new UnreachableException();
+        }
+
+        return new ExecutionRecoveryResult(
+            manifest.Fingerprint,
+            ExecutionRecoveryOutcome.RecoveryRequired,
+            manifest,
+            resolution,
+            ordinal,
+            journalWasUpdated: false,
+            problems:
+            [
+                new ExecutionProblem(
+                    ExecutionProblemKind.JournalFailure,
+                    description,
+                    ordinal),
+                new ExecutionProblem(
+                    ExecutionProblemKind.RecoveryRequired,
+                    "Durable journal state must be re-read before any further execution.",
+                    ordinal),
+            ]);
     }
 
     private static ExecutionRecoveryResult RecoveryResultFromResolution(
