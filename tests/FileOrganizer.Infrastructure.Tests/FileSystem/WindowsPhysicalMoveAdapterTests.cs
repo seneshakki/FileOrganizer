@@ -4,6 +4,7 @@ using FileOrganizer.Application.Orchestration;
 using FileOrganizer.Application.Recovery;
 using FileOrganizer.Core.Paths;
 using FileOrganizer.Core.Physical;
+using FileOrganizer.Core.Planning;
 using FileOrganizer.Infrastructure.FileSystem;
 using FileOrganizer.Infrastructure.Journaling;
 using FileOrganizer.Infrastructure.Tests.Journaling;
@@ -591,6 +592,112 @@ public sealed class WindowsPhysicalMoveAdapterTests
 
         Assert.Equal(0, observations);
         Assert.True(File.Exists(source));
+    }
+
+    [Fact]
+    public async Task WholeManifestPreflightNeverInvokesTheNativeRename()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows native preflight test.");
+        using TemporaryDirectory temporary = TemporaryDirectory.Create();
+        string sourceRoot = Path.Combine(temporary.FullPath, "source");
+        string destination = Path.Combine(temporary.FullPath, "destination");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(destination);
+        string second = temporary.WriteFile(Path.Combine("source", "zeta.txt"), "second");
+        string first = temporary.WriteFile(Path.Combine("source", "alpha.txt"), "first");
+        OrganizationPlan plan = WindowsPhysicalMoveTestPlan.CreatePlan(
+            sourceRoot,
+            [second, first],
+            destination);
+        ExecutionManifest manifest = Assert.IsType<ExecutionManifest>(
+            ExecutionManifestCompiler.Compile(plan).Manifest);
+        int nativeCalls = 0;
+        var observer = new WindowsPhysicalIdentityAdapter();
+        var adapter = new WindowsPhysicalMoveAdapter(
+            isWindows: true,
+            observer.Observe,
+            (_, _) =>
+            {
+                nativeCalls++;
+                return WindowsRenameResult.Success;
+            });
+
+        await using IGlobalExecutionLease globalLease = await AcquireGlobalLease();
+        ExecutionPreflightResult preflight = await adapter.InspectAsync(
+            globalLease,
+            manifest,
+            TestContext.Current.CancellationToken);
+
+        Assert.True(preflight.Succeeded);
+        Assert.All(
+            preflight.Items,
+            static item => Assert.Equal(ExecutionReadiness.Ready, item.Readiness));
+        Assert.Equal(0, nativeCalls);
+        Assert.True(File.Exists(first));
+        Assert.True(File.Exists(second));
+        Assert.False(File.Exists(Path.Combine(destination, "alpha.txt")));
+        Assert.False(File.Exists(Path.Combine(destination, "zeta.txt")));
+    }
+
+    [Fact]
+    public async Task RecoveryObservationRequiresGenuineLeaseAndNeverInvokesRename()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows recovery observation test.");
+        using TemporaryDirectory temporary = TemporaryDirectory.Create();
+        string sourceRoot = Path.Combine(temporary.FullPath, "source");
+        string destination = Path.Combine(temporary.FullPath, "destination");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(destination);
+        string source = temporary.WriteFile(Path.Combine("source", "report.txt"), "source");
+        ExecutionManifest manifest = WindowsPhysicalMoveTestPlan.Create(
+            sourceRoot,
+            source,
+            destination);
+        int observations = 0;
+        int nativeCalls = 0;
+        var adapter = new WindowsPhysicalMoveAdapter(
+            isWindows: true,
+            (path, _) =>
+            {
+                observations++;
+                return path.Equals(manifest.Items[0].SourcePrecondition.CanonicalPath)
+                    ? PhysicalEntryObservation.Success(
+                        manifest.Items[0].SourcePrecondition.PhysicalIdentity!,
+                        new PhysicalFileMetadata(
+                            manifest.Items[0].SourcePrecondition.Length,
+                            manifest.Items[0].SourcePrecondition.CreatedUtc,
+                            manifest.Items[0].SourcePrecondition.ModifiedUtc))
+                    : PhysicalEntryObservation.Missing(2);
+            },
+            (_, _) =>
+            {
+                nativeCalls++;
+                return WindowsRenameResult.Success;
+            });
+
+        await using var forged = new ForgedLease();
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await adapter.ObserveAsync(
+                forged,
+                manifest.Items[0],
+                TestContext.Current.CancellationToken));
+        Assert.Equal(0, observations);
+
+        await using IGlobalExecutionLease globalLease = await AcquireGlobalLease();
+        MoveObservation observation = await adapter.ObserveAsync(
+            globalLease,
+            manifest.Items[0],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(RecoveryEntryObservationKind.Present, observation.Source.Kind);
+        Assert.Equal(
+            manifest.Items[0].SourcePrecondition.PhysicalIdentity,
+            observation.Source.Identity);
+        Assert.Equal(RecoveryEntryObservationKind.Missing, observation.Target.Kind);
+        Assert.Equal(2, observations);
+        Assert.Equal(0, nativeCalls);
+        Assert.True(File.Exists(source));
+        Assert.False(File.Exists(manifest.Items[0].TargetPath.Value));
     }
 
     [Fact]

@@ -11,7 +11,7 @@ using static FileOrganizer.Infrastructure.FileSystem.WindowsFileIdentityNative;
 namespace FileOrganizer.Infrastructure.FileSystem;
 
 /// <summary>
-/// Revalidates and performs one same-volume Windows no-overwrite move.
+/// Preflights, observes, and performs same-volume Windows no-overwrite moves.
 /// </summary>
 /// <remarks>
 /// The commit uses a source handle and an absolute target with
@@ -21,8 +21,13 @@ namespace FileOrganizer.Infrastructure.FileSystem;
 /// mutation after the final validation and before or during the absolute-path
 /// rename. The adapter still holds the execution capability and relevant
 /// handles, rejects observed reparse points, and requires fresh reconciliation.
+/// Factory-composed instances also isolate execution paths from the durable
+/// journal namespace before genesis is published.
 /// </remarks>
-public sealed class WindowsPhysicalMoveAdapter : IMoveOperationPort
+public sealed class WindowsPhysicalMoveAdapter :
+    IExecutionPreflightPort,
+    IMoveOperationPort,
+    IRecoveryObservationPort
 {
     private const uint DeleteAccess = 0x00010000;
     private const int ErrorNotSameDevice = 17;
@@ -32,6 +37,7 @@ public sealed class WindowsPhysicalMoveAdapter : IMoveOperationPort
     private const uint NoFollowFlags = FileFlagBackupSemantics | FileFlagOpenReparsePoint;
 
     private readonly bool _isWindows;
+    private readonly string? _journalRoot;
     private readonly Func<CanonicalPath, CancellationToken, PhysicalEntryObservation> _observePath;
     private readonly Func<SafeFileHandle, WindowsRenameBuffer, WindowsRenameResult> _rename;
 
@@ -40,7 +46,17 @@ public sealed class WindowsPhysicalMoveAdapter : IMoveOperationPort
         : this(
             OperatingSystem.IsWindows(),
             new WindowsPhysicalIdentityAdapter().Observe,
-            WindowsNoOverwriteRenameNative.Rename)
+            WindowsNoOverwriteRenameNative.Rename,
+            journalRoot: null)
+    {
+    }
+
+    internal WindowsPhysicalMoveAdapter(string journalRoot)
+        : this(
+            OperatingSystem.IsWindows(),
+            new WindowsPhysicalIdentityAdapter().Observe,
+            WindowsNoOverwriteRenameNative.Rename,
+            NormalizeJournalRoot(journalRoot))
     {
     }
 
@@ -48,13 +64,89 @@ public sealed class WindowsPhysicalMoveAdapter : IMoveOperationPort
         bool isWindows,
         Func<CanonicalPath, CancellationToken, PhysicalEntryObservation> observePath,
         Func<SafeFileHandle, WindowsRenameBuffer, WindowsRenameResult> rename)
+        : this(isWindows, observePath, rename, journalRoot: null)
+    {
+    }
+
+    private WindowsPhysicalMoveAdapter(
+        bool isWindows,
+        Func<CanonicalPath, CancellationToken, PhysicalEntryObservation> observePath,
+        Func<SafeFileHandle, WindowsRenameBuffer, WindowsRenameResult> rename,
+        string? journalRoot)
     {
         ArgumentNullException.ThrowIfNull(observePath);
         ArgumentNullException.ThrowIfNull(rename);
 
         _isWindows = isWindows;
+        _journalRoot = journalRoot;
         _observePath = observePath;
         _rename = rename;
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<ExecutionPreflightResult> InspectAsync(
+        IGlobalExecutionLease executionLease,
+        ExecutionManifest manifest,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(executionLease);
+        ArgumentNullException.ThrowIfNull(manifest);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (!WindowsGlobalExecutionLeaseProvider.TryBorrow(executionLease, out var borrow))
+        {
+            throw new InvalidOperationException(
+                "A genuine, live Windows execution lease is required before filesystem access.");
+        }
+
+        using (borrow)
+        {
+            var results = new List<ExecutionPreflightItemResult>(manifest.Items.Count);
+            foreach (ExecutionManifestItem item in manifest.Items)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                ExecutionProblem? isolationProblem = ValidateJournalIsolation(manifest, item);
+                if (isolationProblem is not null)
+                {
+                    results.Add(
+                        ExecutionPreflightItemResult.Blocked(
+                            item.Ordinal,
+                            isolationProblem));
+                    continue;
+                }
+
+                MoveLeaseAcquisition acquisition = await TryAcquireAsync(
+                        executionLease,
+                        manifest,
+                        item,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (acquisition.Readiness != ExecutionReadiness.Ready)
+                {
+                    results.Add(
+                        new ExecutionPreflightItemResult(
+                            item.Ordinal,
+                            acquisition.Readiness,
+                            acquisition.Problem));
+                    continue;
+                }
+
+                IMoveOperationLease moveLease = acquisition.Lease!;
+                await using (moveLease.ConfigureAwait(false))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    ExecutionProblem? identityProblem = ValidateBoundIdentities(item, moveLease);
+                    results.Add(
+                        identityProblem is null
+                            ? ExecutionPreflightItemResult.Ready(item.Ordinal)
+                            : ExecutionPreflightItemResult.Blocked(item.Ordinal, identityProblem));
+                }
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            return new ExecutionPreflightResult(results);
+        }
     }
 
     /// <inheritdoc />
@@ -100,6 +192,44 @@ public sealed class WindowsPhysicalMoveAdapter : IMoveOperationPort
         finally
         {
             borrow?.Dispose();
+        }
+    }
+
+    /// <inheritdoc />
+    public ValueTask<MoveObservation> ObserveAsync(
+        IGlobalExecutionLease executionLease,
+        ExecutionManifestItem item,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(executionLease);
+        ArgumentNullException.ThrowIfNull(item);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (!WindowsGlobalExecutionLeaseProvider.TryBorrow(executionLease, out var borrow))
+        {
+            throw new InvalidOperationException(
+                "A genuine, live Windows execution lease is required before filesystem access.");
+        }
+
+        try
+        {
+            PhysicalEntryObservation source = _observePath(
+                item.SourcePrecondition.CanonicalPath,
+                cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            PhysicalEntryObservation target = _observePath(
+                item.TargetPath,
+                cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            return ValueTask.FromResult(
+                new MoveObservation(
+                    ToRecoveryObservation(source),
+                    ToRecoveryObservation(target)));
+        }
+        finally
+        {
+            borrow.Dispose();
         }
     }
 
@@ -287,6 +417,93 @@ public sealed class WindowsPhysicalMoveAdapter : IMoveOperationPort
         }
 
         return null;
+    }
+
+    private static ExecutionProblem? ValidateBoundIdentities(
+        ExecutionManifestItem item,
+        IMoveOperationLease moveLease)
+    {
+        if (!item.SourcePrecondition.PhysicalIdentity!.Equals(
+                moveLease.SourcePhysicalIdentity))
+        {
+            return SourceProblem(
+                item,
+                "The move lease is bound to a different physical source entry.");
+        }
+
+        return item.DestinationDirectoryPhysicalIdentity.Equals(
+                moveLease.DestinationDirectoryPhysicalIdentity)
+            ? null
+            : DestinationProblem(
+                item,
+                "The move lease is bound to a different physical destination directory.");
+    }
+
+    private ExecutionProblem? ValidateJournalIsolation(
+        ExecutionManifest manifest,
+        ExecutionManifestItem item)
+    {
+        if (_journalRoot is null)
+        {
+            return null;
+        }
+
+        var isolationPolicy = new PathPolicy(
+            PathSyntax.Windows,
+            PathCaseSensitivity.Insensitive,
+            PathUnicodeNormalization.FormC);
+        PathResolution journalResolution = isolationPolicy.CanonicalizeAbsolute(_journalRoot);
+        PathResolution sourceRootResolution = isolationPolicy.CanonicalizeAbsolute(
+            manifest.SourceRoot.Value);
+        PathResolution destinationResolution = isolationPolicy.CanonicalizeAbsolute(
+            item.DestinationDirectory.Value);
+        PathResolution targetResolution = isolationPolicy.CanonicalizeAbsolute(
+            item.TargetPath.Value);
+
+        if (!journalResolution.Succeeded
+            || !sourceRootResolution.Succeeded
+            || !destinationResolution.Succeeded
+            || !targetResolution.Succeeded)
+        {
+            return DestinationProblem(
+                item,
+                "The journal and execution paths could not be compared safely.");
+        }
+
+        CanonicalPath journalRoot = journalResolution.Path!;
+        if (PathsOverlap(isolationPolicy, journalRoot, sourceRootResolution.Path!))
+        {
+            return SourceProblem(
+                item,
+                "The source root overlaps the application-owned journal namespace.");
+        }
+
+        return PathsOverlap(isolationPolicy, journalRoot, destinationResolution.Path!)
+            || PathsOverlap(isolationPolicy, journalRoot, targetResolution.Path!)
+                ? DestinationProblem(
+                    item,
+                    "The destination overlaps the application-owned journal namespace.")
+                : null;
+    }
+
+    private static bool PathsOverlap(
+        PathPolicy policy,
+        CanonicalPath left,
+        CanonicalPath right) =>
+        policy.Relate(left, right) is PathRelationship.Same or PathRelationship.Descendant
+        || policy.Relate(right, left) == PathRelationship.Descendant;
+
+    private static string NormalizeJournalRoot(string journalRoot)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(journalRoot);
+        if (!Path.IsPathFullyQualified(journalRoot))
+        {
+            throw new ArgumentException(
+                "The journal root must be fully qualified.",
+                nameof(journalRoot));
+        }
+
+        return Path.TrimEndingDirectorySeparator(Path.GetFullPath(journalRoot));
     }
 
     private static MoveLeaseAcquisition? OpenDirectoryChain(

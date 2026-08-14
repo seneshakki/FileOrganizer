@@ -1,7 +1,6 @@
 using FileOrganizer.Application.Execution;
 using FileOrganizer.Core.Actions;
 using FileOrganizer.Core.Files;
-using FileOrganizer.Core.Matching;
 using FileOrganizer.Core.Matching.Conditions;
 using FileOrganizer.Core.Paths;
 using FileOrganizer.Core.Physical;
@@ -19,6 +18,21 @@ internal static class WindowsPhysicalMoveTestPlan
         string sourcePath,
         string destinationPath)
     {
+        OrganizationPlan plan = CreatePlan(
+            sourceRootPath,
+            [sourcePath],
+            destinationPath);
+        return Assert.IsType<ExecutionManifest>(
+            ExecutionManifestCompiler.Compile(plan).Manifest);
+    }
+
+    internal static OrganizationPlan CreatePlan(
+        string sourceRootPath,
+        IEnumerable<string> sourcePaths,
+        string destinationPath)
+    {
+        ArgumentNullException.ThrowIfNull(sourcePaths);
+
         var policy = new PathPolicy(
             PathSyntax.Windows,
             PathCaseSensitivity.Insensitive,
@@ -26,39 +40,40 @@ internal static class WindowsPhysicalMoveTestPlan
         var observer = new WindowsPhysicalIdentityAdapter();
 
         CanonicalPath sourceRoot = Canonical(policy, sourceRootPath);
-        CanonicalPath source = Canonical(policy, sourcePath);
         CanonicalPath destination = Canonical(policy, destinationPath);
 
         PhysicalEntryObservation rootObservation = observer.Observe(sourceRoot);
-        PhysicalEntryObservation sourceObservation = observer.Observe(source);
         PhysicalEntryObservation destinationObservation = observer.Observe(destination);
 
         Assert.Equal(PhysicalEntryObservationOutcome.Success, rootObservation.Outcome);
-        Assert.Equal(PhysicalEntryObservationOutcome.Success, sourceObservation.Outcome);
         Assert.Equal(PhysicalEntryObservationOutcome.Success, destinationObservation.Outcome);
 
-        PhysicalFileMetadata metadata = Assert.IsType<PhysicalFileMetadata>(
-            sourceObservation.FileMetadata);
-        var scan = new FileScanResult(
-            sourceRoot,
-            [
-                new FileEntry(
+        FileEntry[] files = sourcePaths.Select(
+            sourcePath =>
+            {
+                CanonicalPath source = Canonical(policy, sourcePath);
+                PhysicalEntryObservation sourceObservation = observer.Observe(source);
+                Assert.Equal(
+                    PhysicalEntryObservationOutcome.Success,
+                    sourceObservation.Outcome);
+                PhysicalFileMetadata metadata = Assert.IsType<PhysicalFileMetadata>(
+                    sourceObservation.FileMetadata);
+                return new FileEntry(
                     source,
                     metadata.Length,
                     metadata.CreatedUtc,
                     metadata.ModifiedUtc,
-                    sourceObservation.Identity),
-            ],
+                    sourceObservation.Identity);
+            }).ToArray();
+        var scan = new FileScanResult(
+            sourceRoot,
+            files,
             [],
             rootObservation.Identity);
 
         var rule = new Rule(
             "move",
-            new NameCondition(
-                NameTarget.FullName,
-                TextOperator.Equals,
-                source.FileName!,
-                CaseSensitivity.Insensitive));
+            new ExtensionCondition([".txt"]));
         var rules = new OrganizationRuleSet(
         [
             new OrganizationRule(
@@ -70,21 +85,19 @@ internal static class WindowsPhysicalMoveTestPlan
                 scan,
                 rules,
                 policy);
-        CanonicalPath target = Assert.IsType<CanonicalPath>(
-            policy.AppendFileName(destination, source.FileName).Path);
         var snapshot = new DestinationStateSnapshot(
             policy.Semantics,
-            [
-                new DestinationPathFact(
-                    destination,
-                    DestinationEntryKind.Directory,
-                    physicalIdentity: destinationObservation.Identity),
-                new DestinationPathFact(target, DestinationEntryKind.Missing),
-            ]);
+            preparation.DestinationPaths.Select(
+                path => policy.AreEquivalent(path, destination)
+                    ? new DestinationPathFact(
+                        path,
+                        DestinationEntryKind.Directory,
+                        physicalIdentity: destinationObservation.Identity)
+                    : new DestinationPathFact(path, DestinationEntryKind.Missing)));
 
         OrganizationPlan plan = OrganizationPlanner.Complete(preparation, snapshot);
         Assert.True(plan.IsEligibleForExecution);
-        return Assert.IsType<ExecutionManifest>(ExecutionManifestCompiler.Compile(plan).Manifest);
+        return plan;
     }
 
     internal static CanonicalPath Canonical(PathPolicy policy, string path) =>
