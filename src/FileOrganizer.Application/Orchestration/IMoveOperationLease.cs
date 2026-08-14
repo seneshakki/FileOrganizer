@@ -3,14 +3,13 @@ using FileOrganizer.Core.Physical;
 namespace FileOrganizer.Application.Orchestration;
 
 /// <summary>
-/// Holds the immediate-revalidation boundary for one move. A future physical
+/// Holds the immediate-revalidation boundary for one move. A physical
 /// implementation may keep safe handles alive for the lifetime of this lease.
 /// </summary>
 /// <remarks>
 /// The lease must preserve the bound source identity and target-safety boundary
-/// through CommitAsync. A future M3B-2 adapter must commit one move with native
+/// through CommitAsync. A physical adapter must commit one move with native
 /// no-overwrite semantics; it must never degrade to overwrite or copy/delete.
-/// M3B-1 provides no physical implementation.
 /// </remarks>
 public interface IMoveOperationLease : IAsyncDisposable
 {

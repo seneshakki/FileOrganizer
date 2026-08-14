@@ -24,7 +24,7 @@ public enum ExecutionProblemKind
     /// <summary>A definite destination collision prevents the move.</summary>
     DestinationConflict,
 
-    /// <summary>The scripted or future physical move reported a definite failure.</summary>
+    /// <summary>The scripted or physical move reported a definite failure.</summary>
     MoveFailed,
 
     /// <summary>The operation's applied/not-applied state is ambiguous.</summary>

@@ -92,7 +92,7 @@ public sealed class WindowsPhysicalIdentityAdapter
         return ObserveHandle(handle, cancellationToken);
     }
 
-    private static PhysicalEntryObservation ObserveHandle(
+    internal static PhysicalEntryObservation ObserveHandle(
         SafeFileHandle handle,
         CancellationToken cancellationToken)
     {
