@@ -18,4 +18,6 @@ public enum ConfigurationProblemKind
     InvalidAction,
     InvalidPath,
     UnsupportedDomainCondition,
+    DuplicateWatchRootId,
+    DuplicateWatchRootPath,
 }

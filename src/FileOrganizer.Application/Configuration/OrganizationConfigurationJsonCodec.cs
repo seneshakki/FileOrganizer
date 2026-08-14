@@ -74,6 +74,13 @@ public static class OrganizationConfigurationJsonCodec
             writer.WriteStartObject();
             writer.WriteNumber("schemaVersion", CurrentSchemaVersion);
             WritePathPolicy(writer, configuration.PathSemantics);
+            writer.WriteStartArray("watchRoots");
+            foreach (WatchRootConfiguration watchRoot in configuration.WatchRoots)
+            {
+                WriteWatchRoot(writer, watchRoot);
+            }
+
+            writer.WriteEndArray();
             writer.WriteStartArray("rules");
             foreach (ConfiguredOrganizationRule configuredRule in configuration.Rules)
             {
@@ -305,6 +312,16 @@ public static class OrganizationConfigurationJsonCodec
         writer.WriteEndObject();
     }
 
+    private static void WriteWatchRoot(Utf8JsonWriter writer, WatchRootConfiguration watchRoot)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("id", watchRoot.Id.ToString("D"));
+        writer.WriteString("rootPath", watchRoot.RootPath.Value);
+        writer.WriteBoolean("enabled", watchRoot.IsEnabled);
+        writer.WriteBoolean("includeSubdirectories", watchRoot.IncludeSubdirectories);
+        writer.WriteEndObject();
+    }
+
     private static void WriteCondition(Utf8JsonWriter writer, ICondition condition)
     {
         writer.WriteStartObject();
@@ -504,7 +521,10 @@ public static class OrganizationConfigurationJsonCodec
                     "The top-level configuration value must be an object.");
             }
 
-            ValidateProperties(root, "/", ["schemaVersion", "pathPolicy", "rules"]);
+            ValidateProperties(
+                root,
+                "/",
+                ["schemaVersion", "pathPolicy", "watchRoots", "rules"]);
             int? schemaVersion = ReadInt32(root, "schemaVersion", "/schemaVersion", required: true);
             if (schemaVersion is not null && schemaVersion != CurrentSchemaVersion)
             {
@@ -522,21 +542,25 @@ public static class OrganizationConfigurationJsonCodec
             }
 
             PathSemantics? semantics = ParsePathPolicy();
-            List<ConfiguredOrganizationRule>? rules = semantics is null
-                ? ParseRules(null)
-                : ParseRules(
-                    new PathPolicy(
-                        semantics.Value.Syntax,
-                        semantics.Value.CaseSensitivity,
-                        semantics.Value.UnicodeNormalization));
+            PathPolicy? pathPolicy = semantics is null
+                ? null
+                : new PathPolicy(
+                    semantics.Value.Syntax,
+                    semantics.Value.CaseSensitivity,
+                    semantics.Value.UnicodeNormalization);
+            List<WatchRootConfiguration>? watchRoots = ParseWatchRoots(pathPolicy);
+            List<ConfiguredOrganizationRule>? rules = ParseRules(pathPolicy);
 
-            if (_problems.Count != 0 || semantics is null || rules is null)
+            if (_problems.Count != 0
+                || semantics is null
+                || watchRoots is null
+                || rules is null)
             {
                 return ConfigurationDecodeResult.Invalid(_problems);
             }
 
             return ConfigurationDecodeResult.Success(
-                new OrganizationConfiguration(semantics.Value, rules));
+                new OrganizationConfiguration(semantics.Value, rules, watchRoots));
         }
 
         private PathSemantics? ParsePathPolicy()
@@ -637,6 +661,152 @@ public static class OrganizationConfigurationJsonCodec
             }
 
             return rules;
+        }
+
+        private List<WatchRootConfiguration>? ParseWatchRoots(PathPolicy? pathPolicy)
+        {
+            if (!root.TryGetProperty("watchRoots", out JsonElement watchRootsElement))
+            {
+                return [];
+            }
+
+            if (watchRootsElement.ValueKind != JsonValueKind.Array)
+            {
+                AddInvalidValue("/watchRoots", "Watch roots must be an array.");
+                return null;
+            }
+
+            List<WatchRootConfiguration> watchRoots = [];
+            HashSet<Guid> ids = [];
+            HashSet<CanonicalPath>? paths = pathPolicy is null
+                ? null
+                : new HashSet<CanonicalPath>(pathPolicy.LogicalComparer);
+
+            int index = 0;
+            foreach (JsonElement element in watchRootsElement.EnumerateArray())
+            {
+                WatchRootConfiguration? watchRoot = ParseWatchRoot(element, index, pathPolicy);
+                if (watchRoot is not null)
+                {
+                    bool uniqueId = ids.Add(watchRoot.Id);
+                    bool uniquePath = paths?.Add(watchRoot.RootPath) ?? true;
+                    if (!uniqueId)
+                    {
+                        _problems.Add(
+                            new ConfigurationProblem(
+                                ConfigurationProblemKind.DuplicateWatchRootId,
+                                $"/watchRoots/{index}/id",
+                                "Watch-root IDs must be unique."));
+                    }
+
+                    if (!uniquePath)
+                    {
+                        _problems.Add(
+                            new ConfigurationProblem(
+                                ConfigurationProblemKind.DuplicateWatchRootPath,
+                                $"/watchRoots/{index}/rootPath",
+                                "Watch-root paths must be logically unique under the configured path policy."));
+                    }
+
+                    if (uniqueId && uniquePath)
+                    {
+                        watchRoots.Add(watchRoot);
+                    }
+                }
+
+                index++;
+            }
+
+            return watchRoots;
+        }
+
+        private WatchRootConfiguration? ParseWatchRoot(
+            JsonElement element,
+            int index,
+            PathPolicy? pathPolicy)
+        {
+            string location = $"/watchRoots/{index}";
+            if (!RequireObject(element, location))
+            {
+                return null;
+            }
+
+            ValidateProperties(
+                element,
+                location,
+                ["id", "rootPath", "enabled", "includeSubdirectories"]);
+
+            string? idText = ReadString(element, "id", location + "/id", required: true);
+            Guid? id = null;
+            if (idText is not null)
+            {
+                if (!Guid.TryParseExact(idText, "D", out Guid parsedId) || parsedId == Guid.Empty)
+                {
+                    AddInvalidValue(
+                        location + "/id",
+                        "A watch-root ID must be a non-empty GUID in D format.");
+                }
+                else
+                {
+                    id = parsedId;
+                }
+            }
+
+            string? rootPathText = ReadString(
+                element,
+                "rootPath",
+                location + "/rootPath",
+                required: true);
+            bool? enabled = ReadBoolean(
+                element,
+                "enabled",
+                location + "/enabled",
+                required: true);
+            bool? includeSubdirectories = ReadBoolean(
+                element,
+                "includeSubdirectories",
+                location + "/includeSubdirectories",
+                required: true);
+
+            CanonicalPath? rootPath = null;
+            if (rootPathText is not null && pathPolicy is not null)
+            {
+                PathResolution resolution = pathPolicy.CanonicalizeAbsolute(rootPathText);
+                if (!resolution.Succeeded)
+                {
+                    _problems.Add(
+                        new ConfigurationProblem(
+                            ConfigurationProblemKind.InvalidPath,
+                            location + "/rootPath",
+                            resolution.Problem!.Description));
+                }
+                else if (!string.Equals(
+                             resolution.Path!.Value,
+                             rootPathText,
+                             StringComparison.Ordinal))
+                {
+                    _problems.Add(
+                        new ConfigurationProblem(
+                            ConfigurationProblemKind.InvalidPath,
+                            location + "/rootPath",
+                            "A watch-root path must use its canonical lexical spelling."));
+                }
+                else
+                {
+                    rootPath = resolution.Path;
+                }
+            }
+
+            return id is not null
+                && rootPath is not null
+                && enabled is not null
+                && includeSubdirectories is not null
+                    ? new WatchRootConfiguration(
+                        id.Value,
+                        rootPath,
+                        enabled.Value,
+                        includeSubdirectories.Value)
+                    : null;
         }
 
         private ConfiguredOrganizationRule? ParseRule(
