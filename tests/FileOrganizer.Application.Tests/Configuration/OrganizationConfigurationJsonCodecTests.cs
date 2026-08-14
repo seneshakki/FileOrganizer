@@ -359,6 +359,47 @@ public sealed class OrganizationConfigurationJsonCodecTests
         Assert.Null(result.Configuration);
     }
 
+    [Fact]
+    public void EscapedUnpairedSurrogateInExtensionArrayIsRejectedStructurally()
+    {
+        string json = MinimalJson(
+            """{"type":"extension","extensions":[".txt","bad\uD800"],"caseSensitivity":"insensitive"}""",
+            MoveActionJson());
+
+        ConfigurationDecodeResult result = OrganizationConfigurationJsonCodec.Decode(json);
+
+        ConfigurationProblem problem = Assert.Single(
+            result.Problems,
+            static problem => problem.Kind == ConfigurationProblemKind.InvalidValue);
+        Assert.Equal("/rules/0/include/extensions/1", problem.Location);
+        Assert.Null(result.Configuration);
+    }
+
+    [Fact]
+    public void EscapedUnpairedSurrogateInPropertyNameIsRejectedStructurally()
+    {
+        string json = """
+            {
+              "schemaVersion": 1,
+              "pathPolicy": {
+                "syntax": "windows",
+                "caseSensitivity": "insensitive",
+                "unicodeNormalization": "formC"
+              },
+              "rules": [],
+              "bad\uD800": true
+            }
+            """;
+
+        ConfigurationDecodeResult result = OrganizationConfigurationJsonCodec.Decode(json);
+
+        ConfigurationProblem problem = Assert.Single(
+            result.Problems,
+            static problem => problem.Kind == ConfigurationProblemKind.InvalidValue);
+        Assert.Equal("/", problem.Location);
+        Assert.Null(result.Configuration);
+    }
+
     private static OrganizationConfiguration FullConfiguration()
     {
         ICondition complex = new AndCondition(

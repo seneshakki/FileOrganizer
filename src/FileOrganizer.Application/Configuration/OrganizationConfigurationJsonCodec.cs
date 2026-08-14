@@ -1441,25 +1441,38 @@ public static class OrganizationConfigurationJsonCodec
             HashSet<string> seen = new(StringComparer.Ordinal);
             foreach (JsonProperty property in element.EnumerateObject())
             {
+                string propertyName;
+                try
+                {
+                    propertyName = property.Name;
+                }
+                catch (InvalidOperationException)
+                {
+                    AddInvalidValue(
+                        location,
+                        "A configuration property name contains an incomplete Unicode surrogate pair.");
+                    continue;
+                }
+
                 string propertyLocation = location == "/"
-                    ? "/" + property.Name
-                    : location + "/" + property.Name;
-                if (!seen.Add(property.Name))
+                    ? "/" + propertyName
+                    : location + "/" + propertyName;
+                if (!seen.Add(propertyName))
                 {
                     _problems.Add(
                         new ConfigurationProblem(
                             ConfigurationProblemKind.DuplicateProperty,
                             propertyLocation,
-                            $"Property '{property.Name}' appears more than once."));
+                            $"Property '{propertyName}' appears more than once."));
                 }
 
-                if (!allowed.Contains(property.Name, StringComparer.Ordinal))
+                if (!allowed.Contains(propertyName, StringComparer.Ordinal))
                 {
                     _problems.Add(
                         new ConfigurationProblem(
                             ConfigurationProblemKind.UnknownProperty,
                             propertyLocation,
-                            $"Property '{property.Name}' is not part of schema version 1."));
+                            $"Property '{propertyName}' is not part of schema version 1."));
                 }
             }
         }
