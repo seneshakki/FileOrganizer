@@ -21,6 +21,6 @@ public enum ExecutionOutcome
     /// <summary>Cancellation stopped the run at a safe orchestration boundary.</summary>
     Interrupted,
 
-    /// <summary>At least one operation has an ambiguous state requiring recovery.</summary>
+    /// <summary>The durable state requires explicit recovery or manual reconciliation.</summary>
     RecoveryRequired,
 }

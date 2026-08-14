@@ -115,6 +115,42 @@ public sealed class OrganizationPlanExecutorTests
         Assert.False(context.GlobalLease.IsOwned);
     }
 
+    [Theory]
+    [InlineData(OrganizationActionKind.CopyToDirectory)]
+    [InlineData(OrganizationActionKind.RenameToLiteralFileName)]
+    public async Task UnsupportedReadyActionIsRejectedBeforeAnyExecutionPort(
+        OrganizationActionKind actionKind)
+    {
+        OrganizationAction action = actionKind switch
+        {
+            OrganizationActionKind.CopyToDirectory =>
+                new CopyToDirectoryAction(@"C:\Sorted\Text"),
+            OrganizationActionKind.RenameToLiteralFileName =>
+                new RenameToLiteralFileNameAction("renamed.txt"),
+            _ => throw new InvalidOperationException(),
+        };
+        OrganizationPlan plan = ManifestTestPlan.Create(
+        [
+            new ManifestTestPlan.TestOperation(
+                @"C:\Inbox\source.txt",
+                action,
+                "unsupported"),
+        ]);
+        Harness context = new();
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.Rejected, result.Outcome);
+        Assert.Contains(
+            result.ManifestProblems,
+            problem => problem.Kind == ExecutionManifestProblemKind.UnsupportedReadyAction
+                && problem.ActionKind == actionKind);
+        Assert.Equal(0, context.GlobalLease.AcquisitionCount);
+        Assert.Equal(0, context.Journal.ReadCount);
+        Assert.Equal(0, context.Journal.BeginCount);
+        Assert.Empty(context.Moves.AcquiredOrdinals);
+    }
+
     [Fact]
     public async Task ImmediateRevalidationFailureStopsAfterTheAppliedPrefix()
     {
@@ -311,6 +347,53 @@ public sealed class OrganizationPlanExecutorTests
     }
 
     [Fact]
+    public async Task AppliedThenConflictStopsBeforeTheRemainingMove()
+    {
+        OrganizationPlan plan = Plan(3);
+        Harness context = new();
+        context.Moves[1].PostCommitObservation =
+            ScriptedMoveStep.SourceOnly(context.Moves[1].Identity);
+        context.Moves[1].AttemptResult = MoveAttemptResult.Conflict(
+            Problem(
+                ExecutionProblemKind.DestinationConflict,
+                "The second target appeared at commit.",
+                1));
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.PartiallyCompleted, result.Outcome);
+        Assert.Equal(
+            [ExecutionItemOutcome.Applied, ExecutionItemOutcome.Conflict, ExecutionItemOutcome.NotAttempted],
+            result.Items.Select(item => item.Outcome));
+        Assert.Equal([0, 1], context.Moves.CommittedOrdinals);
+        Assert.Equal(
+            ExecutionJournalRecordKind.MoveConflict,
+            context.Journal.Records(result.Fingerprint!)[^1].Kind);
+    }
+
+    [Fact]
+    public async Task AppliedThenAmbiguousStopsBeforeTheRemainingMove()
+    {
+        OrganizationPlan plan = Plan(3);
+        Harness context = new();
+        context.Moves[1].PostCommitObservation = new MoveObservation(
+            RecoveryEntryObservation.InspectionFailed(
+                RecoveryInspectionFailureKind.IoFailure),
+            RecoveryEntryObservation.Missing());
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(
+            [ExecutionItemOutcome.Applied, ExecutionItemOutcome.Ambiguous, ExecutionItemOutcome.NotAttempted],
+            result.Items.Select(item => item.Outcome));
+        Assert.Equal([0, 1], context.Moves.CommittedOrdinals);
+        Assert.Equal(
+            ExecutionJournalRecordKind.MoveAmbiguous,
+            context.Journal.Records(result.Fingerprint!)[^1].Kind);
+    }
+
+    [Fact]
     public async Task CancellationBeforeJournalCreationUsesNormalCancellationSemantics()
     {
         OrganizationPlan plan = Plan(1);
@@ -364,6 +447,93 @@ public sealed class OrganizationPlanExecutorTests
     }
 
     [Fact]
+    public async Task CancellationAfterIntentIsDurablyNotAppliedBeforeNativeInvocation()
+    {
+        OrganizationPlan plan = Plan(1);
+        Harness context = new();
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        context.Journal.OnBoundary = boundary =>
+        {
+            if (boundary is
+                {
+                    Boundary: JournalFaultBoundary.AfterPublish,
+                    Record.Kind: ExecutionJournalRecordKind.MoveIntent,
+                })
+            {
+                cancellation.Cancel();
+            }
+        };
+
+        ExecutionResult result = await context.Executor.ExecuteAsync(plan, cancellation.Token);
+
+        Assert.Equal(ExecutionOutcome.Interrupted, result.Outcome);
+        Assert.Equal(ExecutionItemOutcome.NotApplied, Assert.Single(result.Items).Outcome);
+        Assert.Equal(
+            ExecutionProblemKind.CancellationRequested,
+            Assert.Single(result.Problems).Kind);
+        Assert.Empty(context.Moves.CommittedOrdinals);
+        Assert.Equal(
+            [
+                ExecutionJournalRecordKind.ExecutionStarted,
+                ExecutionJournalRecordKind.MoveIntent,
+                ExecutionJournalRecordKind.MoveNotApplied,
+            ],
+            context.Journal.Records(result.Fingerprint!).Select(record => record.Kind));
+        Assert.Equal(
+            JournalRecordReasonKind.CancellationRequested,
+            context.Journal.Records(result.Fingerprint!)[^1].Reason);
+
+        ExecutionResult replay = await context.ExecuteAsync(plan);
+        Assert.Equal(ExecutionOutcome.RecoveryRequired, replay.Outcome);
+        Assert.Equal(ExecutionItemOutcome.NotApplied, Assert.Single(replay.Items).Outcome);
+        Assert.Equal(
+            ExecutionProblemKind.CancellationRequested,
+            Assert.Single(replay.Items[0].Problems).Kind);
+        Assert.Empty(context.Moves.CommittedOrdinals);
+    }
+
+    [Fact]
+    public async Task CancellationOutcomePublicationFailureRequiresRecoveryWithoutNativeInvocation()
+    {
+        OrganizationPlan plan = Plan(1);
+        Harness context = new();
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        context.Journal.OnBoundary = boundary =>
+        {
+            if (boundary is
+                {
+                    Boundary: JournalFaultBoundary.AfterPublish,
+                    Record.Kind: ExecutionJournalRecordKind.MoveIntent,
+                })
+            {
+                cancellation.Cancel();
+            }
+        };
+        context.Journal.PublishOverride = record =>
+            record.Kind == ExecutionJournalRecordKind.MoveNotApplied
+                ? JournalPublishResult.PersistenceFailure()
+                : null;
+
+        ExecutionResult result = await context.Executor.ExecuteAsync(plan, cancellation.Token);
+
+        Assert.Equal(ExecutionOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(ExecutionItemOutcome.NotApplied, Assert.Single(result.Items).Outcome);
+        Assert.Equal(
+            [
+                ExecutionProblemKind.JournalFailure,
+                ExecutionProblemKind.RecoveryRequired,
+                ExecutionProblemKind.CancellationRequested,
+            ],
+            result.Problems.Select(problem => problem.Kind));
+        Assert.Empty(context.Moves.CommittedOrdinals);
+        Assert.Equal(
+            [ExecutionJournalRecordKind.ExecutionStarted, ExecutionJournalRecordKind.MoveIntent],
+            context.Journal.Records(result.Fingerprint!).Select(record => record.Kind));
+    }
+
+    [Fact]
     public async Task CancellationDuringCommitWaitsForObservationAndDurableOutcome()
     {
         OrganizationPlan plan = Plan(2);
@@ -391,7 +561,7 @@ public sealed class OrganizationPlanExecutorTests
     }
 
     [Fact]
-    public async Task CancellationDuringFinalCommitStillPublishesCompletion()
+    public async Task CancellationDuringFinalCommitRecordsAppliedThenInterrupts()
     {
         OrganizationPlan plan = Plan(1);
         Harness context = new();
@@ -401,12 +571,111 @@ public sealed class OrganizationPlanExecutorTests
 
         ExecutionResult result = await context.Executor.ExecuteAsync(plan, cancellation.Token);
 
-        Assert.Equal(ExecutionOutcome.Completed, result.Outcome);
+        Assert.Equal(ExecutionOutcome.Interrupted, result.Outcome);
         Assert.Equal(ExecutionItemOutcome.Applied, Assert.Single(result.Items).Outcome);
         Assert.Equal([0], context.Moves.ObservedOrdinals);
         Assert.Equal(
-            ExecutionJournalRecordKind.ExecutionCompleted,
+            ExecutionJournalRecordKind.ExecutionInterrupted,
             context.Journal.Records(result.Fingerprint!)[^1].Kind);
+        Assert.DoesNotContain(
+            context.Journal.Records(result.Fingerprint!),
+            record => record.Kind == ExecutionJournalRecordKind.ExecutionCompleted);
+    }
+
+    [Theory]
+    [InlineData(
+        MoveAttemptOutcome.Failed,
+        ExecutionItemOutcome.NotApplied,
+        ExecutionProblemKind.MoveFailed,
+        ExecutionJournalRecordKind.MoveNotApplied)]
+    [InlineData(
+        MoveAttemptOutcome.Blocked,
+        ExecutionItemOutcome.Blocked,
+        ExecutionProblemKind.SourceRevalidationFailed,
+        ExecutionJournalRecordKind.MoveNotApplied)]
+    [InlineData(
+        MoveAttemptOutcome.Conflict,
+        ExecutionItemOutcome.Conflict,
+        ExecutionProblemKind.DestinationConflict,
+        ExecutionJournalRecordKind.MoveConflict)]
+    public async Task CancellationAroundDefinitivePhysicalOutcomePreservesItAndInterrupts(
+        MoveAttemptOutcome attemptOutcome,
+        ExecutionItemOutcome expectedItemOutcome,
+        ExecutionProblemKind expectedProblemKind,
+        ExecutionJournalRecordKind expectedRecordKind)
+    {
+        OrganizationPlan plan = Plan(3);
+        Harness context = new();
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        ExecutionProblem operationProblem = Problem(
+            expectedProblemKind,
+            "The physical operation stopped definitively.",
+            0);
+        context.Moves[0].PostCommitObservation =
+            ScriptedMoveStep.SourceOnly(context.Moves[0].Identity);
+        context.Moves[0].AttemptResult = attemptOutcome switch
+        {
+            MoveAttemptOutcome.Failed => MoveAttemptResult.Failure(operationProblem),
+            MoveAttemptOutcome.Blocked => MoveAttemptResult.Blocked(operationProblem),
+            MoveAttemptOutcome.Conflict => MoveAttemptResult.Conflict(operationProblem),
+            _ => throw new InvalidOperationException(),
+        };
+        context.Moves[0].OnCommitted = cancellation.Cancel;
+
+        ExecutionResult result = await context.Executor.ExecuteAsync(plan, cancellation.Token);
+
+        Assert.Equal(ExecutionOutcome.Interrupted, result.Outcome);
+        Assert.Equal(
+            [expectedItemOutcome, ExecutionItemOutcome.NotAttempted, ExecutionItemOutcome.NotAttempted],
+            result.Items.Select(item => item.Outcome));
+        Assert.Equal(expectedProblemKind, Assert.Single(result.Items[0].Problems).Kind);
+        Assert.Contains(
+            result.Problems,
+            problem => problem.Kind == ExecutionProblemKind.CancellationRequested);
+        Assert.Equal([0], context.Moves.CommittedOrdinals);
+        Assert.Equal([0], context.Moves.ObservedOrdinals);
+        Assert.Equal(
+            expectedRecordKind,
+            context.Journal.Records(result.Fingerprint!)[^1].Kind);
+        Assert.DoesNotContain(
+            context.Journal.Records(result.Fingerprint!),
+            record => record.Kind == ExecutionJournalRecordKind.ExecutionInterrupted);
+    }
+
+    [Fact]
+    public async Task CancellationAroundAmbiguousPhysicalOutcomePreservesRecoveryRequired()
+    {
+        OrganizationPlan plan = Plan(2);
+        Harness context = new();
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        context.Moves[0].PostCommitObservation = new MoveObservation(
+            RecoveryEntryObservation.InspectionFailed(
+                RecoveryInspectionFailureKind.IoFailure),
+            RecoveryEntryObservation.Missing());
+        context.Moves[0].OnCommitted = cancellation.Cancel;
+
+        ExecutionResult result = await context.Executor.ExecuteAsync(plan, cancellation.Token);
+
+        Assert.Equal(ExecutionOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(
+            [ExecutionItemOutcome.Ambiguous, ExecutionItemOutcome.NotAttempted],
+            result.Items.Select(item => item.Outcome));
+        Assert.Equal(
+            ExecutionProblemKind.MoveOutcomeAmbiguous,
+            Assert.Single(result.Items[0].Problems).Kind);
+        Assert.Contains(
+            result.Problems,
+            problem => problem.Kind == ExecutionProblemKind.CancellationRequested);
+        Assert.Equal([0], context.Moves.CommittedOrdinals);
+        Assert.Equal([0], context.Moves.ObservedOrdinals);
+        Assert.Equal(
+            ExecutionJournalRecordKind.MoveAmbiguous,
+            context.Journal.Records(result.Fingerprint!)[^1].Kind);
+        Assert.DoesNotContain(
+            context.Journal.Records(result.Fingerprint!),
+            record => record.Kind == ExecutionJournalRecordKind.ExecutionInterrupted);
     }
 
     [Fact]
@@ -566,6 +835,156 @@ public sealed class OrganizationPlanExecutorTests
     }
 
     [Fact]
+    public async Task GenesisPersistenceFailureStopsBeforeAnyPhysicalMutation()
+    {
+        OrganizationPlan plan = Plan(1);
+        Harness context = new();
+        context.Journal.BeginOverride = (_, _) => JournalBeginResult.PersistenceFailure();
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.Stopped, result.Outcome);
+        Assert.Equal(ExecutionItemOutcome.NotAttempted, Assert.Single(result.Items).Outcome);
+        Assert.Equal(ExecutionProblemKind.JournalFailure, Assert.Single(result.Problems).Kind);
+        Assert.Empty(context.Moves.AcquiredOrdinals);
+        Assert.Empty(context.Moves.CommittedOrdinals);
+        Assert.Empty(context.Journal.Records(result.Fingerprint!));
+    }
+
+    [Fact]
+    public async Task IntentPersistenceFailureRequiresRecoveryAndNeverInvokesMover()
+    {
+        OrganizationPlan plan = Plan(1);
+        Harness context = new();
+        context.Journal.PublishOverride = record =>
+            record.Kind == ExecutionJournalRecordKind.MoveIntent
+                ? JournalPublishResult.PersistenceFailure()
+                : null;
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(ExecutionItemOutcome.NotAttempted, Assert.Single(result.Items).Outcome);
+        Assert.Equal(
+            [ExecutionProblemKind.JournalFailure, ExecutionProblemKind.RecoveryRequired],
+            result.Problems.Select(problem => problem.Kind));
+        Assert.Empty(context.Moves.CommittedOrdinals);
+        Assert.Equal(
+            [ExecutionJournalRecordKind.ExecutionStarted],
+            context.Journal.Records(result.Fingerprint!).Select(record => record.Kind));
+    }
+
+    [Fact]
+    public async Task AppliedMoveResultPersistenceFailureStopsAndCannotRetryMutation()
+    {
+        OrganizationPlan plan = Plan(2);
+        Harness context = new();
+        context.Journal.PublishOverride = record =>
+            record.Kind == ExecutionJournalRecordKind.MoveApplied
+                ? JournalPublishResult.PersistenceFailure()
+                : null;
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+        int commitsAfterFailure = context.Moves.CommittedOrdinals.Count;
+        ExecutionResult retry = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(
+            [ExecutionItemOutcome.Applied, ExecutionItemOutcome.NotAttempted],
+            result.Items.Select(item => item.Outcome));
+        Assert.Equal(
+            [ExecutionProblemKind.JournalFailure, ExecutionProblemKind.RecoveryRequired],
+            result.Problems.Select(problem => problem.Kind));
+        Assert.Equal(1, commitsAfterFailure);
+        Assert.Equal(commitsAfterFailure, context.Moves.CommittedOrdinals.Count);
+        Assert.Equal(ExecutionOutcome.RecoveryRequired, retry.Outcome);
+        Assert.Equal(
+            [ExecutionJournalRecordKind.ExecutionStarted, ExecutionJournalRecordKind.MoveIntent],
+            context.Journal.Records(result.Fingerprint!).Select(record => record.Kind));
+    }
+
+    [Theory]
+    [InlineData(
+        MoveAttemptOutcome.Blocked,
+        ExecutionItemOutcome.Blocked,
+        ExecutionProblemKind.SourceRevalidationFailed,
+        ExecutionJournalRecordKind.MoveNotApplied)]
+    [InlineData(
+        MoveAttemptOutcome.Conflict,
+        ExecutionItemOutcome.Conflict,
+        ExecutionProblemKind.DestinationConflict,
+        ExecutionJournalRecordKind.MoveConflict)]
+    public async Task ResultPersistenceFailurePreservesExactDefinitivePhysicalOutcome(
+        MoveAttemptOutcome attemptOutcome,
+        ExecutionItemOutcome expectedItemOutcome,
+        ExecutionProblemKind expectedProblemKind,
+        ExecutionJournalRecordKind failedRecordKind)
+    {
+        OrganizationPlan plan = Plan(2);
+        Harness context = new();
+        context.Moves[0].PostCommitObservation =
+            ScriptedMoveStep.SourceOnly(context.Moves[0].Identity);
+        ExecutionProblem operationProblem = Problem(
+            expectedProblemKind,
+            "The physical operation stopped definitively.",
+            0);
+        context.Moves[0].AttemptResult = attemptOutcome switch
+        {
+            MoveAttemptOutcome.Blocked => MoveAttemptResult.Blocked(operationProblem),
+            MoveAttemptOutcome.Conflict => MoveAttemptResult.Conflict(operationProblem),
+            _ => throw new InvalidOperationException(),
+        };
+        context.Journal.PublishOverride = record => record.Kind == failedRecordKind
+            ? JournalPublishResult.PersistenceFailure()
+            : null;
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(
+            [expectedItemOutcome, ExecutionItemOutcome.NotAttempted],
+            result.Items.Select(item => item.Outcome));
+        Assert.Equal(expectedProblemKind, Assert.Single(result.Items[0].Problems).Kind);
+        Assert.Contains(
+            result.Problems,
+            problem => problem.Kind == ExecutionProblemKind.JournalFailure);
+        Assert.Contains(
+            result.Problems,
+            problem => problem.Kind == ExecutionProblemKind.RecoveryRequired);
+        Assert.Equal([0], context.Moves.CommittedOrdinals);
+        Assert.Equal(
+            [ExecutionJournalRecordKind.ExecutionStarted, ExecutionJournalRecordKind.MoveIntent],
+            context.Journal.Records(result.Fingerprint!).Select(record => record.Kind));
+    }
+
+    [Fact]
+    public async Task TerminalPersistenceFailureRetainsAppliedItemsWithoutRepeatingMoves()
+    {
+        OrganizationPlan plan = Plan(1);
+        Harness context = new();
+        context.Journal.PublishOverride = record =>
+            record.Kind == ExecutionJournalRecordKind.ExecutionCompleted
+                ? JournalPublishResult.PersistenceFailure()
+                : null;
+
+        ExecutionResult result = await context.ExecuteAsync(plan);
+        int commitsAfterFailure = context.Moves.CommittedOrdinals.Count;
+        ExecutionResult retry = await context.ExecuteAsync(plan);
+
+        Assert.Equal(ExecutionOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(ExecutionItemOutcome.Applied, Assert.Single(result.Items).Outcome);
+        Assert.Equal(
+            [ExecutionProblemKind.JournalFailure, ExecutionProblemKind.RecoveryRequired],
+            result.Problems.Select(problem => problem.Kind));
+        Assert.Equal(1, commitsAfterFailure);
+        Assert.Equal(commitsAfterFailure, context.Moves.CommittedOrdinals.Count);
+        Assert.Equal(ExecutionOutcome.RecoveryRequired, retry.Outcome);
+        Assert.Equal(
+            ExecutionJournalRecordKind.MoveApplied,
+            context.Journal.Records(result.Fingerprint!)[^1].Kind);
+    }
+
+    [Fact]
     public async Task MoveAppliedWithoutCompletionRequiresRecoverAndIsNotClaimedComplete()
     {
         OrganizationPlan plan = Plan(1);
@@ -651,25 +1070,44 @@ public sealed class OrganizationPlanExecutorTests
         Assert.Empty(context.Moves.CommittedOrdinals);
     }
 
-    [Fact]
-    public async Task UnrelatedAlreadyPublishedRecordFailsBeforeCommit()
+    [Theory]
+    [InlineData(JournalPublishStatus.SequenceConflict)]
+    [InlineData(JournalPublishStatus.InvalidJournal)]
+    [InlineData(JournalPublishStatus.AlreadyPublished)]
+    public async Task InvalidIntentPublicationRequiresRecoveryBeforeCommit(
+        JournalPublishStatus publishStatus)
     {
         OrganizationPlan plan = Plan(1);
         Harness context = new();
         context.Journal.PublishOverride = requested =>
             requested.Kind == ExecutionJournalRecordKind.MoveIntent
-                ? JournalPublishResult.AlreadyPublished(
-                    ExecutionJournalRecord.ExecutionStarted(
-                        requested.RunId,
-                        requested.Fingerprint,
-                        requested.Sequence,
-                        requested.RecordedAtUtc))
+                ? publishStatus switch
+                {
+                    JournalPublishStatus.SequenceConflict =>
+                        JournalPublishResult.SequenceConflict(),
+                    JournalPublishStatus.InvalidJournal =>
+                        JournalPublishResult.InvalidJournal(),
+                    JournalPublishStatus.AlreadyPublished =>
+                        JournalPublishResult.AlreadyPublished(
+                            ExecutionJournalRecord.ExecutionStarted(
+                                requested.RunId,
+                                requested.Fingerprint,
+                                requested.Sequence,
+                                requested.RecordedAtUtc)),
+                    _ => throw new InvalidOperationException(),
+                }
                 : null;
 
-        await Assert.ThrowsAsync<InvalidOperationException>(
-            () => context.ExecuteAsync(plan).AsTask());
+        ExecutionResult result = await context.ExecuteAsync(plan);
 
+        Assert.Equal(ExecutionOutcome.RecoveryRequired, result.Outcome);
+        Assert.Equal(
+            [ExecutionProblemKind.InvalidJournal, ExecutionProblemKind.RecoveryRequired],
+            result.Problems.Select(problem => problem.Kind));
         Assert.Empty(context.Moves.CommittedOrdinals);
+        Assert.Equal(
+            [ExecutionJournalRecordKind.ExecutionStarted],
+            context.Journal.Records(result.Fingerprint!).Select(record => record.Kind));
     }
 
     [Fact]

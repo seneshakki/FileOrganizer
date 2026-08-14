@@ -42,13 +42,18 @@ public interface IExecutionJournalStore : IExecutionJournalReplaySource
     /// manifest and its sequence-zero ExecutionStarted record. If a journal
     /// with this fingerprint already exists, returns it unchanged. If another
     /// fingerprint owns unresolved state, returns that blocking snapshot and
-    /// does not create a journal. Safely closed histories may coexist.
+    /// does not create a journal. A persistence failure exposes no trusted
+    /// snapshot and grants no mutation authority. Safely closed histories may coexist.
     /// </summary>
     ValueTask<JournalBeginResult> BeginAsync(
         ExecutionManifest manifest,
         ExecutionJournalRecord startRecord,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Atomically appends one record. Persistence failure or invalid durable
+    /// state is reported explicitly and never authorizes a following mutation.
+    /// </summary>
     ValueTask<JournalPublishResult> PublishAsync(
         ExecutionJournalRecord record,
         CancellationToken cancellationToken = default);

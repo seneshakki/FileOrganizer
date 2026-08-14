@@ -5,7 +5,7 @@ namespace FileOrganizer.Application.Journaling;
 
 /// <summary>
 /// Returns the exact durable journal created, found by fingerprint, or found
-/// blocking creation because its execution is still unresolved.
+/// blocking creation, or reports that genesis durability could not be established.
 /// </summary>
 public sealed class JournalBeginResult
 {
@@ -21,10 +21,11 @@ public sealed class JournalBeginResult
         }
 
         ArgumentNullException.ThrowIfNull(snapshot);
-        if (status == JournalBeginStatus.InvalidExistingJournal)
+        if (status is JournalBeginStatus.InvalidExistingJournal
+            or JournalBeginStatus.PersistenceFailure)
         {
             throw new ArgumentException(
-                "An invalid existing journal cannot expose a trusted snapshot.",
+                "A failed journal begin cannot expose a trusted snapshot.",
                 nameof(status));
         }
 
@@ -62,6 +63,17 @@ public sealed class JournalBeginResult
         _problems = Array.AsReadOnly(problemSnapshot);
     }
 
+    private JournalBeginResult(JournalBeginStatus status)
+    {
+        if (status != JournalBeginStatus.PersistenceFailure)
+        {
+            throw new ArgumentOutOfRangeException(nameof(status));
+        }
+
+        Status = status;
+        _problems = Array.AsReadOnly(Array.Empty<ExecutionJournalReadProblem>());
+    }
+
     public JournalBeginStatus Status { get; }
 
     public ExecutionJournalSnapshot? Snapshot { get; }
@@ -85,4 +97,11 @@ public sealed class JournalBeginResult
     /// </summary>
     public static JournalBeginResult ConflictingExecutionOwnership(
         IEnumerable<ExecutionJournalReadProblem> problems) => new(null, problems);
+
+    /// <summary>
+    /// Reports that durable genesis publication failed or its durability could
+    /// not be established. No trusted snapshot is exposed.
+    /// </summary>
+    public static JournalBeginResult PersistenceFailure() =>
+        new(JournalBeginStatus.PersistenceFailure);
 }

@@ -190,6 +190,7 @@ public sealed class ExecutionJournalRecord : IEquatable<ExecutionJournalRecord>
             nameof(reason),
             JournalRecordReasonKind.MoveDidNotApply,
             JournalRecordReasonKind.RecoveryConfirmedNotApplied,
+            JournalRecordReasonKind.CancellationRequested,
             JournalRecordReasonKind.SourceRevalidationFailed,
             JournalRecordReasonKind.DestinationRevalidationFailed);
         return new(

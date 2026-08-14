@@ -2,7 +2,7 @@ namespace FileOrganizer.Application.Journaling;
 
 /// <summary>
 /// Reports whether an append was published, already existed as the same
-/// logical record at the requested sequence, or collided with a different record.
+/// logical record, collided with durable state, or failed its persistence boundary.
 /// </summary>
 public sealed class JournalPublishResult
 {
@@ -33,4 +33,10 @@ public sealed class JournalPublishResult
     {
         return new(JournalPublishStatus.SequenceConflict, existingRecord);
     }
+
+    public static JournalPublishResult PersistenceFailure() =>
+        new(JournalPublishStatus.PersistenceFailure, null);
+
+    public static JournalPublishResult InvalidJournal() =>
+        new(JournalPublishStatus.InvalidJournal, null);
 }

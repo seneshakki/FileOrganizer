@@ -333,14 +333,17 @@ public sealed class ExecutionResult
                     item => item.Outcome != ExecutionItemOutcome.Applied);
                 if (!problems.Any(
                         problem => problem.Kind == ExecutionProblemKind.CancellationRequested)
-                    || interruption < 0
-                    || items[interruption].Outcome is not (
-                        ExecutionItemOutcome.NotApplied or ExecutionItemOutcome.NotAttempted)
-                    || items.Skip(interruption + 1).Any(
-                        item => item.Outcome != ExecutionItemOutcome.NotAttempted))
+                    || (interruption >= 0
+                        && (items[interruption].Outcome is not (
+                                ExecutionItemOutcome.NotApplied
+                                or ExecutionItemOutcome.Blocked
+                                or ExecutionItemOutcome.Conflict
+                                or ExecutionItemOutcome.NotAttempted)
+                            || items.Skip(interruption + 1).Any(
+                                item => item.Outcome != ExecutionItemOutcome.NotAttempted))))
                 {
                     throw new ArgumentException(
-                        "Interrupted requires a cancellation problem and an applied prefix followed by a not-applied/not-attempted suffix.",
+                        "Interrupted requires a cancellation problem and either an applied manifest or an applied prefix followed by one exact definitive outcome or a not-attempted suffix.",
                         nameof(outcome));
                 }
 
@@ -358,12 +361,15 @@ public sealed class ExecutionResult
                 }
 
                 if (items[recoveryPoint].Outcome is not (
-                        ExecutionItemOutcome.NotApplied or ExecutionItemOutcome.Ambiguous)
+                        ExecutionItemOutcome.NotApplied
+                        or ExecutionItemOutcome.Blocked
+                        or ExecutionItemOutcome.Conflict
+                        or ExecutionItemOutcome.Ambiguous)
                     || items.Skip(recoveryPoint + 1).Any(
                         item => item.Outcome != ExecutionItemOutcome.NotAttempted))
                 {
                     throw new ArgumentException(
-                        "RecoveryRequired requires an applied prefix, an optional paused or ambiguous item, and a not-attempted suffix.",
+                        "RecoveryRequired requires an applied prefix, an optional exact stopped or ambiguous item, and a not-attempted suffix.",
                         nameof(outcome));
                 }
 

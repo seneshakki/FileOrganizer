@@ -9,10 +9,17 @@ namespace FileOrganizer.Application.Orchestration;
 
 /// <summary>
 /// Coordinates deterministic, journal-first move execution through abstract
-/// ports. M3B-1 supplies no physical implementation of the move capability.
+/// ports.
 /// </summary>
 public sealed class OrganizationPlanExecutor
 {
+    private enum JournalPublicationOutcome
+    {
+        Succeeded,
+        PersistenceFailure,
+        InvalidJournal,
+    }
+
     private readonly IExecutionPreflightPort _preflight;
     private readonly IMoveOperationPort _moves;
     private readonly IRecoveryObservationPort _recoveryObservations;
@@ -153,6 +160,19 @@ public sealed class OrganizationPlanExecutor
                     cancellationToken)
                 .ConfigureAwait(false);
 
+            if (begin.Status == JournalBeginStatus.PersistenceFailure)
+            {
+                return CreateNotAttemptedResult(
+                    manifest,
+                    attemptStartedAt,
+                    ExecutionOutcome.Stopped,
+                    [
+                        new ExecutionProblem(
+                            ExecutionProblemKind.JournalFailure,
+                            "The execution journal genesis could not be published durably."),
+                    ]);
+            }
+
             if (begin.Status == JournalBeginStatus.InvalidExistingJournal)
             {
                 return InvalidExistingJournalResult(
@@ -256,7 +276,6 @@ public sealed class OrganizationPlanExecutor
                         NextJournalTime(ref lastJournalTime),
                         ordinal,
                         reason);
-                    await PublishRequiredAsync(stop).ConfigureAwait(false);
 
                     ExecutionItemOutcome itemOutcome = acquisition.Readiness
                         == ExecutionReadiness.Conflict
@@ -266,6 +285,18 @@ public sealed class OrganizationPlanExecutor
                         ordinal,
                         itemOutcome,
                         [acquisition.Problem!]);
+
+                    JournalPublicationOutcome publication =
+                        await TryPublishRequiredAsync(stop).ConfigureAwait(false);
+                    if (JournalPublicationFailureResult(
+                            publication,
+                            manifest,
+                            attemptStartedAt,
+                            results,
+                            "The pre-intent stop could not be published durably.") is { } failure)
+                    {
+                        return failure;
+                    }
 
                     return CreateDefiniteStopResult(
                         manifest,
@@ -293,12 +324,24 @@ public sealed class OrganizationPlanExecutor
                             NextJournalTime(ref lastJournalTime),
                             ordinal,
                             stopReason);
-                        await PublishRequiredAsync(stop).ConfigureAwait(false);
 
                         results[ordinal] = new ExecutionItemResult(
                             ordinal,
                             ExecutionItemOutcome.Blocked,
                             [identityProblem]);
+
+                        JournalPublicationOutcome publication =
+                            await TryPublishRequiredAsync(stop).ConfigureAwait(false);
+                        if (JournalPublicationFailureResult(
+                                publication,
+                                manifest,
+                                attemptStartedAt,
+                                results,
+                                "The pre-intent identity stop could not be published durably.") is { } failure)
+                        {
+                            return failure;
+                        }
+
                         return CreateDefiniteStopResult(
                             manifest,
                             attemptStartedAt,
@@ -315,7 +358,53 @@ public sealed class OrganizationPlanExecutor
                         NextJournalTime(ref lastJournalTime),
                         ordinal,
                         expectedSourceIdentity);
-                    await PublishRequiredAsync(intent).ConfigureAwait(false);
+                    JournalPublicationOutcome intentPublication =
+                        await TryPublishRequiredAsync(intent).ConfigureAwait(false);
+                    if (JournalPublicationFailureResult(
+                            intentPublication,
+                            manifest,
+                            attemptStartedAt,
+                            results,
+                            "The move intent could not be published durably.") is { } intentFailure)
+                    {
+                        return intentFailure;
+                    }
+
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        ExecutionProblem cancellation = new(
+                            ExecutionProblemKind.CancellationRequested,
+                            "Cancellation was honored after intent publication and before physical mutation.",
+                            ordinal);
+                        results[ordinal] = new ExecutionItemResult(
+                            ordinal,
+                            ExecutionItemOutcome.NotApplied,
+                            [cancellation]);
+                        ExecutionJournalRecord cancelled = ExecutionJournalRecord.MoveNotApplied(
+                            runId,
+                            manifest.Fingerprint,
+                            nextSequence++,
+                            NextJournalTime(ref lastJournalTime),
+                            ordinal,
+                            JournalRecordReasonKind.CancellationRequested);
+                        JournalPublicationOutcome cancellationPublication =
+                            await TryPublishRequiredAsync(cancelled).ConfigureAwait(false);
+                        if (JournalPublicationFailureResult(
+                                cancellationPublication,
+                                manifest,
+                                attemptStartedAt,
+                                results,
+                                "The definitive cancelled move outcome could not be published durably.") is { } cancellationFailure)
+                        {
+                            return cancellationFailure;
+                        }
+
+                        return CreateInterruptedResult(
+                            manifest,
+                            attemptStartedAt,
+                            results,
+                            cancellation);
+                    }
 
                     // This is the critical boundary: unexpected failures intentionally
                     // escape with a durable pending intent for RecoverAsync to reconcile.
@@ -337,7 +426,6 @@ public sealed class OrganizationPlanExecutor
                         ordinal,
                         attempt,
                         resolution);
-                    await PublishRequiredAsync(outcomeRecord).ConfigureAwait(false);
 
                     if (resolution.Disposition == RecoveryDisposition.Applied)
                     {
@@ -345,35 +433,88 @@ public sealed class OrganizationPlanExecutor
                             ordinal,
                             ExecutionItemOutcome.Applied,
                             []);
-                        continue;
+                    }
+                    else
+                    {
+                        ExecutionProblem operationProblem = CreateMoveOutcomeProblem(
+                            ordinal,
+                            attempt,
+                            resolution);
+                        ExecutionItemOutcome operationOutcome = ToExecutionItemOutcome(
+                            attempt,
+                            resolution);
+                        results[ordinal] = new ExecutionItemResult(
+                            ordinal,
+                            operationOutcome,
+                            [operationProblem]);
                     }
 
-                    ExecutionProblem operationProblem = CreateMoveOutcomeProblem(
-                        ordinal,
-                        attempt,
-                        resolution);
-                    ExecutionItemOutcome operationOutcome = ToExecutionItemOutcome(
-                        attempt,
-                        resolution);
-                    results[ordinal] = new ExecutionItemResult(
-                        ordinal,
-                        operationOutcome,
-                        [operationProblem]);
+                    JournalPublicationOutcome outcomePublication =
+                        await TryPublishRequiredAsync(outcomeRecord).ConfigureAwait(false);
+                    if (JournalPublicationFailureResult(
+                            outcomePublication,
+                            manifest,
+                            attemptStartedAt,
+                            results,
+                            "The reconciled move outcome could not be published durably.") is { } outcomeFailure)
+                    {
+                        return outcomeFailure;
+                    }
 
-                    return resolution.Disposition is
-                        RecoveryDisposition.Ambiguous or RecoveryDisposition.ManualRecovery
-                            ? new ExecutionResult(
+                    if (resolution.Disposition != RecoveryDisposition.Applied)
+                    {
+                        ExecutionProblem operationProblem = results[ordinal].Problems[0];
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            ExecutionProblem cancellation = new(
+                                ExecutionProblemKind.CancellationRequested,
+                                "Cancellation was observed after the physical outcome was reconciled durably.");
+                            if (resolution.Disposition is
+                                RecoveryDisposition.Ambiguous or RecoveryDisposition.ManualRecovery)
+                            {
+                                return new ExecutionResult(
+                                    manifest,
+                                    attemptStartedAt,
+                                    NotBefore(attemptStartedAt),
+                                    ExecutionOutcome.RecoveryRequired,
+                                    results,
+                                    [operationProblem, cancellation]);
+                            }
+
+                            return CreateInterruptedResult(
                                 manifest,
                                 attemptStartedAt,
-                                NotBefore(attemptStartedAt),
-                                ExecutionOutcome.RecoveryRequired,
                                 results,
-                                [operationProblem])
-                            : CreateDefiniteStopResult(
-                                manifest,
-                                attemptStartedAt,
-                                results,
-                                operationProblem);
+                                cancellation);
+                        }
+
+                        return resolution.Disposition is
+                            RecoveryDisposition.Ambiguous or RecoveryDisposition.ManualRecovery
+                                ? new ExecutionResult(
+                                    manifest,
+                                    attemptStartedAt,
+                                    NotBefore(attemptStartedAt),
+                                    ExecutionOutcome.RecoveryRequired,
+                                    results,
+                                    [operationProblem])
+                                : CreateDefiniteStopResult(
+                                    manifest,
+                                    attemptStartedAt,
+                                    results,
+                                    operationProblem);
+                    }
+                }
+
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return await InterruptAfterStartAsync(
+                            manifest,
+                            runId,
+                            attemptStartedAt,
+                            results,
+                            nextSequence,
+                            lastJournalTime)
+                        .ConfigureAwait(false);
                 }
             }
 
@@ -382,7 +523,17 @@ public sealed class OrganizationPlanExecutor
                 manifest.Fingerprint,
                 nextSequence,
                 NextJournalTime(ref lastJournalTime));
-            await PublishRequiredAsync(completed).ConfigureAwait(false);
+            JournalPublicationOutcome completionPublication =
+                await TryPublishRequiredAsync(completed).ConfigureAwait(false);
+            if (JournalPublicationFailureResult(
+                    completionPublication,
+                    manifest,
+                    attemptStartedAt,
+                    results,
+                    "The successful terminal journal record could not be published durably.") is { } completionFailure)
+            {
+                return completionFailure;
+            }
 
             return new ExecutionResult(
                 manifest,
@@ -513,7 +664,7 @@ public sealed class OrganizationPlanExecutor
             bool updated = false;
             if (decision.Record is not null)
             {
-                await PublishRequiredAsync(decision.Record).ConfigureAwait(false);
+                await PublishRecoveryRecordRequiredAsync(decision.Record).ConfigureAwait(false);
                 updated = true;
             }
 
@@ -549,7 +700,7 @@ public sealed class OrganizationPlanExecutor
                     manifest.Fingerprint,
                     state.NextSequence,
                     NextJournalTime(ref lastJournalTime));
-                await PublishRequiredAsync(completed).ConfigureAwait(false);
+                await PublishRecoveryRecordRequiredAsync(completed).ConfigureAwait(false);
                 return new ExecutionRecoveryResult(
                     manifest.Fingerprint,
                     ExecutionRecoveryOutcome.Completed,
@@ -890,32 +1041,61 @@ public sealed class OrganizationPlanExecutor
             nextSequence,
             NextJournalTime(ref lastJournalTime),
             JournalRecordReasonKind.CancellationRequested);
-        await PublishRequiredAsync(interrupted).ConfigureAwait(false);
 
         ExecutionProblem cancellation = new(
             ExecutionProblemKind.CancellationRequested,
             "Cancellation was honored at a safe execution boundary.");
-        return new ExecutionResult(
+        JournalPublicationOutcome publication =
+            await TryPublishRequiredAsync(interrupted).ConfigureAwait(false);
+        if (JournalPublicationFailureResult(
+                publication,
+                manifest,
+                attemptStartedAt,
+                results,
+                "The cancellation boundary could not be published durably.") is { } failure)
+        {
+            return failure;
+        }
+
+        return CreateInterruptedResult(
             manifest,
             attemptStartedAt,
-            NotBefore(attemptStartedAt),
-            ExecutionOutcome.Interrupted,
             results,
-            [cancellation]);
+            cancellation);
     }
 
-    private async ValueTask PublishRequiredAsync(ExecutionJournalRecord record)
+    private async ValueTask<JournalPublicationOutcome> TryPublishRequiredAsync(
+        ExecutionJournalRecord record)
     {
         JournalPublishResult result = await _journal.PublishAsync(
                 record,
                 CancellationToken.None)
             .ConfigureAwait(false);
-        if (result.Status == JournalPublishStatus.SequenceConflict
-            || (result.Status == JournalPublishStatus.AlreadyPublished
-                && !record.Equals(result.ExistingRecord)))
+
+        return result.Status switch
+        {
+            JournalPublishStatus.Published => JournalPublicationOutcome.Succeeded,
+            JournalPublishStatus.AlreadyPublished when record.Equals(result.ExistingRecord) =>
+                JournalPublicationOutcome.Succeeded,
+            JournalPublishStatus.PersistenceFailure =>
+                JournalPublicationOutcome.PersistenceFailure,
+            JournalPublishStatus.SequenceConflict
+                or JournalPublishStatus.InvalidJournal
+                or JournalPublishStatus.AlreadyPublished =>
+                    JournalPublicationOutcome.InvalidJournal,
+            _ => throw new UnreachableException(),
+        };
+    }
+
+    private async ValueTask PublishRecoveryRecordRequiredAsync(
+        ExecutionJournalRecord record)
+    {
+        JournalPublicationOutcome publication =
+            await TryPublishRequiredAsync(record).ConfigureAwait(false);
+        if (publication != JournalPublicationOutcome.Succeeded)
         {
             throw new InvalidOperationException(
-                $"Journal sequence {record.Sequence} contains a different durable record.");
+                $"Journal sequence {record.Sequence} could not be published safely during recovery.");
         }
     }
 
@@ -1145,11 +1325,18 @@ public sealed class OrganizationPlanExecutor
                     operation.Ordinal,
                     ExecutionItemOutcome.Applied,
                     []),
-                JournalOperationStatus.NotApplied => ItemWithProblem(
-                    operation.Ordinal,
-                    ExecutionItemOutcome.NotApplied,
-                    ExecutionProblemKind.MoveFailed,
-                    "The journal records that the move did not apply."),
+                JournalOperationStatus.NotApplied => operation.Reason
+                    == JournalRecordReasonKind.CancellationRequested
+                        ? ItemWithProblem(
+                            operation.Ordinal,
+                            ExecutionItemOutcome.NotApplied,
+                            ExecutionProblemKind.CancellationRequested,
+                            "The journal records cancellation before physical mutation.")
+                        : ItemWithProblem(
+                            operation.Ordinal,
+                            ExecutionItemOutcome.NotApplied,
+                            ExecutionProblemKind.MoveFailed,
+                            "The journal records that the move did not apply."),
                 JournalOperationStatus.Blocked => ItemWithProblem(
                     operation.Ordinal,
                     ExecutionItemOutcome.Blocked,
@@ -1229,6 +1416,68 @@ public sealed class OrganizationPlanExecutor
             ExecutionOutcome.Stopped,
             results,
             failures.Select(failure => failure.Problem!));
+    }
+
+    private ExecutionResult? JournalPublicationFailureResult(
+        JournalPublicationOutcome publication,
+        ExecutionManifest manifest,
+        DateTimeOffset startedAt,
+        ExecutionItemResult[] results,
+        string persistenceDescription)
+    {
+        if (publication == JournalPublicationOutcome.Succeeded)
+        {
+            return null;
+        }
+
+        ExecutionProblem publicationProblem = publication switch
+        {
+            JournalPublicationOutcome.PersistenceFailure => new ExecutionProblem(
+                ExecutionProblemKind.JournalFailure,
+                persistenceDescription),
+            JournalPublicationOutcome.InvalidJournal => new ExecutionProblem(
+                ExecutionProblemKind.InvalidJournal,
+                "The journal rejected the requested append because its durable state is invalid or conflicting."),
+            _ => throw new UnreachableException(),
+        };
+        ExecutionProblem recovery = new(
+            ExecutionProblemKind.RecoveryRequired,
+            "The durable execution state must be inspected before any further mutation.");
+        ExecutionProblem[] problems =
+        [
+            .. results.SelectMany(item => item.Problems),
+            publicationProblem,
+            recovery,
+        ];
+
+        return new ExecutionResult(
+            manifest,
+            startedAt,
+            NotBefore(startedAt),
+            ExecutionOutcome.RecoveryRequired,
+            results,
+            problems);
+    }
+
+    private ExecutionResult CreateInterruptedResult(
+        ExecutionManifest manifest,
+        DateTimeOffset startedAt,
+        ExecutionItemResult[] results,
+        ExecutionProblem cancellation)
+    {
+        ExecutionProblem[] problems =
+        [
+            .. results.SelectMany(item => item.Problems),
+            cancellation,
+        ];
+
+        return new ExecutionResult(
+            manifest,
+            startedAt,
+            NotBefore(startedAt),
+            ExecutionOutcome.Interrupted,
+            results,
+            problems.Distinct());
     }
 
     private ExecutionResult CreateDefiniteStopResult(

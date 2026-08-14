@@ -5,6 +5,13 @@ public enum JournalBeginStatus
 {
     Begun,
     AlreadyExists,
+
+    /// <summary>
+    /// The store could not establish whether the genesis publication completed
+    /// durably. No physical operation may be attempted.
+    /// </summary>
+    PersistenceFailure,
+
     /// <summary>
     /// A different fingerprint owns an unresolved durable execution. The
     /// returned snapshot identifies the history that must be resolved first.
