@@ -34,6 +34,7 @@ public sealed class GlobCondition : Condition
 {
     private readonly string _pattern;
     private readonly NameTarget _target;
+    private readonly CaseSensitivity _caseSensitivity;
     private readonly bool _ignoreCase;
 
     /// <param name="pattern">The wildcard pattern.</param>
@@ -47,11 +48,18 @@ public sealed class GlobCondition : Condition
     {
         _pattern = pattern ?? string.Empty;
         _target = target;
+        _caseSensitivity = caseSensitivity;
         _ignoreCase = caseSensitivity != CaseSensitivity.Sensitive;
     }
 
     /// <summary>Gets the pattern this condition matches against.</summary>
     public string Pattern => _pattern;
+
+    /// <summary>Gets which part of the file name this condition examines.</summary>
+    public NameTarget Target => _target;
+
+    /// <summary>Gets whether the glob comparison distinguishes letter case.</summary>
+    public CaseSensitivity CaseSensitivity => _caseSensitivity;
 
     /// <inheritdoc />
     protected override ConditionResult EvaluateCore(FileEntry file, EvaluationContext context)

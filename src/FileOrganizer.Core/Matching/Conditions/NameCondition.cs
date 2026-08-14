@@ -41,6 +41,15 @@ public sealed class NameCondition : Condition
     /// <summary>Gets the text this condition looks for.</summary>
     public string Value => _value;
 
+    /// <summary>Gets which part of the file name this condition examines.</summary>
+    public NameTarget Target => _target;
+
+    /// <summary>Gets how the configured text is compared with the file name.</summary>
+    public TextOperator Operator => _operator;
+
+    /// <summary>Gets whether the name comparison distinguishes letter case.</summary>
+    public CaseSensitivity CaseSensitivity => _caseSensitivity;
+
     /// <inheritdoc />
     protected override ConditionResult EvaluateCore(FileEntry file, EvaluationContext context)
     {

@@ -43,6 +43,9 @@ public sealed class ExtensionCondition : Condition
     /// <summary>Gets the extensions this condition accepts, each normalized.</summary>
     public IReadOnlyList<string> Extensions => _extensions;
 
+    /// <summary>Gets whether extension comparisons distinguish letter case.</summary>
+    public CaseSensitivity CaseSensitivity => _caseSensitivity;
+
     /// <inheritdoc />
     protected override ConditionResult EvaluateCore(FileEntry file, EvaluationContext context)
     {

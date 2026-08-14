@@ -40,6 +40,15 @@ public sealed class AgeCondition : Condition
         _age = age;
     }
 
+    /// <summary>Gets which file timestamp is used to calculate age.</summary>
+    public TimestampField Field => _field;
+
+    /// <summary>Gets how the file's age is compared with the configured age.</summary>
+    public ComparisonOperator Operator => _operator;
+
+    /// <summary>Gets the configured age threshold.</summary>
+    public TimeSpan Age => _age;
+
     /// <inheritdoc />
     protected override ConditionResult EvaluateCore(FileEntry file, EvaluationContext context)
     {

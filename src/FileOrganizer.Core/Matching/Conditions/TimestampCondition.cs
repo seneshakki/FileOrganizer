@@ -33,6 +33,15 @@ public sealed class TimestampCondition : Condition
         _threshold = threshold.ToUniversalTime();
     }
 
+    /// <summary>Gets which file timestamp this condition examines.</summary>
+    public TimestampField Field => _field;
+
+    /// <summary>Gets how the file timestamp is compared with the threshold.</summary>
+    public ComparisonOperator Operator => _operator;
+
+    /// <summary>Gets the configured threshold normalized to UTC.</summary>
+    public DateTimeOffset ThresholdUtc => _threshold;
+
     /// <inheritdoc />
     protected override ConditionResult EvaluateCore(FileEntry file, EvaluationContext context)
     {

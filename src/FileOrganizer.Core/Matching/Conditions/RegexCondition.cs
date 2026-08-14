@@ -32,6 +32,8 @@ public sealed class RegexCondition : Condition
     private readonly Regex? _regex;
     private readonly EvaluationProblem _timeoutProblem;
     private readonly NameTarget _target;
+    private readonly CaseSensitivity _caseSensitivity;
+    private readonly TimeSpan _timeout;
 
     /// <param name="pattern">The regular expression.</param>
     /// <param name="target">Which part of the name to match against.</param>
@@ -48,15 +50,24 @@ public sealed class RegexCondition : Condition
         : this(
             Compile(pattern, target, caseSensitivity, timeout ?? DefaultTimeout),
             pattern ?? string.Empty,
-            target)
+            target,
+            caseSensitivity,
+            timeout ?? DefaultTimeout)
     {
     }
 
-    private RegexCondition(CompiledPattern compiled, string pattern, NameTarget target)
+    private RegexCondition(
+        CompiledPattern compiled,
+        string pattern,
+        NameTarget target,
+        CaseSensitivity caseSensitivity,
+        TimeSpan timeout)
         : base(compiled.Problem)
     {
         _regex = compiled.Regex;
         _target = target;
+        _caseSensitivity = caseSensitivity;
+        _timeout = timeout;
         Pattern = pattern;
 
         _timeoutProblem = new EvaluationProblem(
@@ -67,6 +78,15 @@ public sealed class RegexCondition : Condition
 
     /// <summary>Gets the pattern this condition matches against.</summary>
     public string Pattern { get; }
+
+    /// <summary>Gets which part of the file name this condition examines.</summary>
+    public NameTarget Target => _target;
+
+    /// <summary>Gets whether the regular-expression comparison distinguishes letter case.</summary>
+    public CaseSensitivity CaseSensitivity => _caseSensitivity;
+
+    /// <summary>Gets the time limit for matching one file name.</summary>
+    public TimeSpan Timeout => _timeout;
 
     /// <inheritdoc />
     protected override ConditionResult EvaluateCore(FileEntry file, EvaluationContext context)

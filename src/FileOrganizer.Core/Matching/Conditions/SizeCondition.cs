@@ -23,6 +23,12 @@ public sealed class SizeCondition : Condition
         _sizeInBytes = sizeInBytes;
     }
 
+    /// <summary>Gets how a file's size is compared with the configured size.</summary>
+    public ComparisonOperator Operator => _operator;
+
+    /// <summary>Gets the configured size threshold in bytes.</summary>
+    public long SizeInBytes => _sizeInBytes;
+
     /// <inheritdoc />
     protected override ConditionResult EvaluateCore(FileEntry file, EvaluationContext context) =>
         _operator.Accepts(file.SizeInBytes.CompareTo(_sizeInBytes))
