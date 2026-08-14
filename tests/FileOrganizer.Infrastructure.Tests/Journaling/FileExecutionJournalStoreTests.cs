@@ -53,6 +53,22 @@ public sealed class FileExecutionJournalStoreTests
     }
 
     [Fact]
+    public async Task ConstructionAndReadDoNotCreateAMissingJournalRoot()
+    {
+        using TemporaryDirectory temp = TemporaryDirectory.Create();
+        string root = Path.Combine(temp.FullPath, "journal");
+        FileExecutionJournalStore store = new(root);
+        ExecutionManifest manifest = JournalStoreTestManifest.Create();
+
+        ExecutionJournalReadResult read = await store.ReadForReplayAsync(
+            manifest.Fingerprint,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionJournalReadStatus.NotFound, read.Status);
+        Assert.False(Directory.Exists(root));
+    }
+
+    [Fact]
     public async Task IdenticalBeginAndPublishAreIdempotentButConflictsNeverOverwrite()
     {
         using TemporaryDirectory temp = TemporaryDirectory.Create();
@@ -579,6 +595,7 @@ public sealed class FileExecutionJournalStoreTests
         using TemporaryDirectory temp = TemporaryDirectory.Create();
         string root = Path.Combine(temp.FullPath, "journal");
         FileExecutionJournalStore store = new(root);
+        Directory.CreateDirectory(root);
         Directory.CreateDirectory(
             Path.Combine(root, $".{new string('a', 64)}.{new string('1', 32)}.staging"));
         ExecutionManifest manifest = JournalStoreTestManifest.Create();

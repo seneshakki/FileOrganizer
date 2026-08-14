@@ -63,7 +63,7 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
         _gate = RootGates.GetOrAdd(
             OperatingSystem.IsWindows() ? _root.ToUpperInvariant() : _root,
             static _ => new SemaphoreSlim(1, 1));
-        EnsureRootIsSafe(createWhenMissing: true);
+        EnsureRootIsSafe(createWhenMissing: false);
     }
 
     public async ValueTask<ExecutionJournalSnapshot?> ReadAsync(
@@ -616,6 +616,8 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
 
     private void EnsureRootIsSafe(bool createWhenMissing)
     {
+        RejectReparsePointsInExistingAncestors(_root);
+
         if (!Directory.Exists(_root))
         {
             if (!createWhenMissing)
@@ -623,11 +625,9 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
                 return;
             }
 
-            RejectReparsePointsInExistingAncestors(_root);
             Directory.CreateDirectory(_root);
+            RejectReparsePointsInExistingAncestors(_root);
         }
-
-        RejectReparsePointsInExistingAncestors(_root);
     }
 
     private static void RejectReparsePointsInExistingAncestors(string path)
