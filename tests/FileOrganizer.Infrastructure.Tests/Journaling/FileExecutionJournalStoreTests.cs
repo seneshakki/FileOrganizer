@@ -69,6 +69,27 @@ public sealed class FileExecutionJournalStoreTests
     }
 
     [Fact]
+    public async Task RootCreationFailureBeforeGenesisIsReturnedAsStructuredPersistenceFailure()
+    {
+        using TemporaryDirectory temp = TemporaryDirectory.Create();
+        string root = Path.Combine(temp.FullPath, "journal");
+        FileExecutionJournalStore store = new(root);
+        File.WriteAllText(root, "not-a-directory");
+        ExecutionManifest manifest = JournalStoreTestManifest.Create();
+
+        JournalBeginResult result = await store.BeginAsync(
+            manifest,
+            Start(manifest),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(JournalBeginStatus.PersistenceFailure, result.Status);
+        Assert.Equal("not-a-directory", File.ReadAllText(root));
+        Assert.DoesNotContain(
+            Directory.EnumerateFileSystemEntries(temp.FullPath),
+            static path => Path.GetFileName(path).EndsWith(".staging", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task IdenticalBeginAndPublishAreIdempotentButConflictsNeverOverwrite()
     {
         using TemporaryDirectory temp = TemporaryDirectory.Create();

@@ -475,6 +475,93 @@ public sealed class WindowsPhysicalMoveAdapterTests
     }
 
     [Fact]
+    public async Task UnexpectedNativeFailureReleasesEveryHeldPhysicalHandle()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows native cleanup test.");
+        using TemporaryDirectory temporary = TemporaryDirectory.Create();
+        string sourceRoot = Path.Combine(temporary.FullPath, "source");
+        string destination = Path.Combine(temporary.FullPath, "destination");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(destination);
+        string source = temporary.WriteFile(Path.Combine("source", "report.txt"), "source");
+        ExecutionManifest manifest = WindowsPhysicalMoveTestPlan.Create(
+            sourceRoot,
+            source,
+            destination);
+        var adapter = new WindowsPhysicalMoveAdapter(
+            isWindows: true,
+            new WindowsPhysicalIdentityAdapter().Observe,
+            (_, _) => throw new InvalidOperationException("Injected native failure."));
+
+        await using IGlobalExecutionLease globalLease = await AcquireGlobalLease();
+        MoveLeaseAcquisition acquisition = await adapter.TryAcquireAsync(
+            globalLease,
+            manifest,
+            manifest.Items[0],
+            TestContext.Current.CancellationToken);
+        await using IMoveOperationLease moveLease =
+            Assert.IsAssignableFrom<IMoveOperationLease>(acquisition.Lease);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => moveLease.CommitAsync().AsTask());
+        await moveLease.DisposeAsync();
+
+        using (FileStream stream = new(
+                   source,
+                   FileMode.Open,
+                   FileAccess.ReadWrite,
+                   FileShare.None))
+        {
+            Assert.True(stream.CanWrite);
+        }
+
+        string movedSourceRoot = Path.Combine(temporary.FullPath, "source-after-fault");
+        string movedDestination = Path.Combine(temporary.FullPath, "destination-after-fault");
+        Directory.Move(sourceRoot, movedSourceRoot);
+        Directory.Move(destination, movedDestination);
+        Assert.True(File.Exists(Path.Combine(movedSourceRoot, "report.txt")));
+    }
+
+    [Fact]
+    public async Task UnexpectedPreflightObservationFailureReleasesHandlesAndLeaseBorrow()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows native cleanup test.");
+        using TemporaryDirectory temporary = TemporaryDirectory.Create();
+        string sourceRoot = Path.Combine(temporary.FullPath, "source");
+        string destination = Path.Combine(temporary.FullPath, "destination");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(destination);
+        string source = temporary.WriteFile(Path.Combine("source", "report.txt"), "source");
+        ExecutionManifest manifest = WindowsPhysicalMoveTestPlan.Create(
+            sourceRoot,
+            source,
+            destination);
+        var adapter = new WindowsPhysicalMoveAdapter(
+            isWindows: true,
+            (_, _) => throw new IOException("Injected target observation failure."),
+            (_, _) => throw new InvalidOperationException("Native call must not run."));
+        IGlobalExecutionLease globalLease = await AcquireGlobalLease();
+
+        await Assert.ThrowsAsync<IOException>(
+            () => adapter.TryAcquireAsync(
+                globalLease,
+                manifest,
+                manifest.Items[0],
+                TestContext.Current.CancellationToken).AsTask());
+
+        await globalLease.DisposeAsync().AsTask().WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+        string movedSourceRoot = Path.Combine(temporary.FullPath, "source-after-fault");
+        string movedDestination = Path.Combine(temporary.FullPath, "destination-after-fault");
+        Directory.Move(sourceRoot, movedSourceRoot);
+        Directory.Move(destination, movedDestination);
+        Assert.True(File.Exists(Path.Combine(movedSourceRoot, "report.txt")));
+
+        await using IGlobalExecutionLease reacquired = await AcquireGlobalLease();
+    }
+
+    [Fact]
     public async Task AppliedManifestCannotSilentlyExecuteAgain()
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows native move test.");

@@ -143,8 +143,11 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
                 string name = Path.GetFileName(executionDirectory);
                 if (!TryFingerprint(name, out PlanFingerprint? otherFingerprint))
                 {
-                    throw new JournalStoreException(
-                        Failure(JournalLoadProblemKind.UnsafeJournalPath, "The journal root contains an invalid execution directory.", fileName: name));
+                    return JournalBeginResult.ConflictingExecutionOwnership(
+                    [
+                        new ExecutionJournalReadProblem(
+                            ExecutionJournalReadProblemKind.UnexpectedStorageEntry),
+                    ]);
                 }
 
                 JournalLoadResult other = otherFingerprint!.Equals(manifest.Fingerprint)
@@ -227,6 +230,12 @@ public sealed class FileExecutionJournalStore : IExecutionJournalStore
                     TryDeleteStagingDirectory(staging);
                 }
             }
+        }
+        catch (Exception exception) when (
+            exception is not JournalStoreException
+            && IsExpectedPersistenceFailure(exception))
+        {
+            return JournalBeginResult.PersistenceFailure();
         }
         finally
         {
