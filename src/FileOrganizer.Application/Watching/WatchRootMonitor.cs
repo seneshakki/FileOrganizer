@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Threading.Channels;
 using FileOrganizer.Application.Configuration;
 using FileOrganizer.Core.Paths;
@@ -99,6 +100,15 @@ public sealed class WatchRootMonitor : IDisposable, IAsyncDisposable
     public event EventHandler<WatchRootNotification>? Notification;
 
     public Guid WatchRootId => _configuration.Id;
+
+    /// <summary>Gets the immutable canonical root represented by this monitor.</summary>
+    public CanonicalPath RootPath => _configuration.RootPath;
+
+    /// <summary>Gets whether this monitor observes ordinary descendants recursively.</summary>
+    public bool IncludeSubdirectories => _configuration.IncludeSubdirectories;
+
+    /// <summary>Gets whether this monitor's immutable configuration enables the root.</summary>
+    public bool IsEnabled => _configuration.IsEnabled;
 
     public WatchRootState State
     {
@@ -236,12 +246,21 @@ public sealed class WatchRootMonitor : IDisposable, IAsyncDisposable
     /// <summary>
     /// Accepts a completed baseline only when no watcher event arrived since its token was captured.
     /// </summary>
-    public bool AcknowledgeBaseline(WatchBaselineToken token)
+    public bool AcknowledgeBaseline(WatchBaselineToken token) =>
+        AcknowledgeBaselineAndCaptureSnapshot(token, out _);
+
+    /// <summary>
+    /// Atomically accepts an unchanged baseline and captures its synchronized generation.
+    /// </summary>
+    public bool AcknowledgeBaselineAndCaptureSnapshot(
+        WatchBaselineToken token,
+        [NotNullWhen(true)] out WatchSnapshotToken? snapshotToken)
     {
         ArgumentNullException.ThrowIfNull(token);
         WatchRootNotification? stateNotification = null;
         WatchRootNotification? diagnosticNotification = null;
         bool accepted;
+        snapshotToken = null;
         lock (_outputGate)
         {
             lock (_gate)
@@ -256,6 +275,10 @@ public sealed class WatchRootMonitor : IDisposable, IAsyncDisposable
                 ClearTrackingLocked();
                 if (accepted)
                 {
+                    snapshotToken = new WatchSnapshotToken(
+                        WatchRootId,
+                        _baselineEventGeneration,
+                        _pipelineEpoch);
                     if (SetStateLocked(WatchRootState.Synchronized))
                     {
                         stateNotification = WatchRootNotification.StateChanged(
@@ -295,6 +318,102 @@ public sealed class WatchRootMonitor : IDisposable, IAsyncDisposable
         }
 
         return accepted;
+    }
+
+    /// <summary>Captures the current synchronized generation without changing monitor state.</summary>
+    public bool TryCaptureSynchronizedSnapshot(
+        [NotNullWhen(true)] out WatchSnapshotToken? snapshotToken)
+    {
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            if (_source is null
+                || !_sourceStarted
+                || _state != WatchRootState.Synchronized)
+            {
+                snapshotToken = null;
+                return false;
+            }
+
+            snapshotToken = new WatchSnapshotToken(
+                WatchRootId,
+                _baselineEventGeneration,
+                _pipelineEpoch);
+            return true;
+        }
+    }
+
+    /// <summary>Reports whether a synchronized snapshot token still names current root state.</summary>
+    public bool IsSnapshotCurrent(WatchSnapshotToken snapshotToken)
+    {
+        ArgumentNullException.ThrowIfNull(snapshotToken);
+        lock (_gate)
+        {
+            return IsSnapshotCurrentLocked(snapshotToken);
+        }
+    }
+
+    /// <summary>
+    /// Invalidates one still-current synchronized snapshot after read-only work finds uncertainty.
+    /// </summary>
+    public bool RequireRescan(
+        WatchSnapshotToken snapshotToken,
+        WatchDiagnostic diagnostic)
+    {
+        ArgumentNullException.ThrowIfNull(snapshotToken);
+        ArgumentNullException.ThrowIfNull(diagnostic);
+
+        bool changed;
+        lock (_outputGate)
+        {
+            lock (_gate)
+            {
+                if (!IsSnapshotCurrentLocked(snapshotToken))
+                {
+                    return false;
+                }
+
+                changed = TransitionToRescanLocked();
+            }
+
+            PublishRescanNotifications(diagnostic, affectedPath: null, changed);
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Atomically invalidates a live synchronized root so a newly attached
+    /// preview coordinator can establish its own full-root baseline.
+    /// </summary>
+    /// <remarks>
+    /// This startup-only boundary intentionally has no stale-work token.
+    /// Asynchronous consumers must use the token-fenced overload instead.
+    /// </remarks>
+    internal bool RequireCoordinatorBaseline(WatchDiagnostic diagnostic)
+    {
+        ArgumentNullException.ThrowIfNull(diagnostic);
+
+        bool changed;
+        lock (_outputGate)
+        {
+            lock (_gate)
+            {
+                if (_disposed
+                    || _source is null
+                    || !_sourceStarted
+                    || _state != WatchRootState.Synchronized)
+                {
+                    return false;
+                }
+
+                changed = TransitionToRescanLocked();
+            }
+
+            PublishRescanNotifications(diagnostic, affectedPath: null, changed);
+        }
+
+        return true;
     }
 
     /// <summary>Waits until all source callbacks queued before this call have been classified.</summary>
@@ -759,6 +878,10 @@ public sealed class WatchRootMonitor : IDisposable, IAsyncDisposable
                         "An unproven deleted entry may have changed directory scope."),
                     path);
             }
+            else
+            {
+                PublishRefreshIfCurrent(message, path!);
+            }
 
             return;
         }
@@ -870,6 +993,10 @@ public sealed class WatchRootMonitor : IDisposable, IAsyncDisposable
                     new WatchDiagnostic(
                         WatchDiagnosticKind.UnknownRename,
                         "An untracked entry was renamed out of the watch root."));
+            }
+            else
+            {
+                PublishRefreshIfCurrent(message, oldPath!);
             }
         }
     }
@@ -1273,6 +1400,36 @@ public sealed class WatchRootMonitor : IDisposable, IAsyncDisposable
         && _state == WatchRootState.Synchronized
         && message.SourceSession == _activeSourceSession
         && message.PipelineEpoch == _pipelineEpoch;
+
+    private bool IsSnapshotCurrentLocked(WatchSnapshotToken snapshotToken) =>
+        !_disposed
+        && snapshotToken.WatchRootId == WatchRootId
+        && snapshotToken.EventGeneration == _baselineEventGeneration
+        && snapshotToken.SynchronizationEpoch == _pipelineEpoch
+        && _source is not null
+        && _sourceStarted
+        && _state == WatchRootState.Synchronized;
+
+    private void PublishRefreshIfCurrent(
+        RawEventMessage message,
+        CanonicalPath affectedPath)
+    {
+        lock (_outputGate)
+        {
+            lock (_gate)
+            {
+                if (!IsCurrentRawEventLocked(message))
+                {
+                    return;
+                }
+            }
+
+            PublishCore(
+                WatchRootNotification.RefreshRequested(
+                    WatchRootId,
+                    affectedPath));
+        }
+    }
 
     private void MarkAffectedPendingArrivalsLocked(FileChangeSourceEvent change)
     {

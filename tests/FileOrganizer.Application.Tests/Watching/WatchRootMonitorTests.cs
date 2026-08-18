@@ -14,6 +14,121 @@ public sealed class WatchRootMonitorTests
         new(2026, 8, 14, 8, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public async Task MonitorExposesItsImmutableRootComposition()
+    {
+        await using Harness harness = new();
+
+        Assert.Equal(RootId, harness.Monitor.WatchRootId);
+        Assert.Equal(@"C:\Watch", harness.Monitor.RootPath.Value);
+        Assert.True(harness.Monitor.IsEnabled);
+        Assert.True(harness.Monitor.IncludeSubdirectories);
+    }
+
+    [Fact]
+    public async Task BaselineAcknowledgementAtomicallyReturnsCurrentSnapshot()
+    {
+        await using Harness harness = new();
+        harness.Monitor.Start();
+
+        bool accepted = harness.Monitor.AcknowledgeBaselineAndCaptureSnapshot(
+            harness.Monitor.CaptureBaselineToken(),
+            out WatchSnapshotToken? acknowledged);
+
+        Assert.True(accepted);
+        Assert.NotNull(acknowledged);
+        Assert.True(harness.Monitor.IsSnapshotCurrent(acknowledged));
+        Assert.True(
+            harness.Monitor.TryCaptureSynchronizedSnapshot(
+                out WatchSnapshotToken? captured));
+        Assert.Equal(acknowledged, captured);
+    }
+
+    [Fact]
+    public async Task BaselineMismatchCannotReturnSnapshotToken()
+    {
+        await using Harness harness = new();
+        harness.Monitor.Start();
+        WatchBaselineToken stale = harness.Monitor.CaptureBaselineToken();
+        harness.Source.Raise(
+            Change(FileChangeSourceEventKind.Created, 1, Harness.File("arrival.txt")));
+
+        bool accepted = harness.Monitor.AcknowledgeBaselineAndCaptureSnapshot(
+            stale,
+            out WatchSnapshotToken? snapshot);
+
+        Assert.False(accepted);
+        Assert.Null(snapshot);
+        Assert.Equal(WatchRootState.RescanRequired, harness.Monitor.State);
+        Assert.False(harness.Monitor.TryCaptureSynchronizedSnapshot(out _));
+    }
+
+    [Fact]
+    public async Task RejectedAcknowledgementAndResynchronizationCannotReviveOldSnapshot()
+    {
+        await using Harness harness = await Harness.SynchronizedAsync();
+        Assert.True(
+            harness.Monitor.TryCaptureSynchronizedSnapshot(
+                out WatchSnapshotToken? original));
+
+        Assert.False(
+            harness.Monitor.AcknowledgeBaselineAndCaptureSnapshot(
+                new WatchBaselineToken(RootId, original.EventGeneration + 1),
+                out WatchSnapshotToken? rejected));
+        Assert.Null(rejected);
+        Assert.Equal(WatchRootState.RescanRequired, harness.Monitor.State);
+
+        Assert.True(
+            harness.Monitor.AcknowledgeBaselineAndCaptureSnapshot(
+                harness.Monitor.CaptureBaselineToken(),
+                out WatchSnapshotToken? replacement));
+
+        Assert.Equal(original.EventGeneration, replacement.EventGeneration);
+        Assert.NotEqual(original.SynchronizationEpoch, replacement.SynchronizationEpoch);
+        Assert.False(harness.Monitor.IsSnapshotCurrent(original));
+        Assert.True(harness.Monitor.IsSnapshotCurrent(replacement));
+    }
+
+    [Fact]
+    public async Task WatcherArrivalImmediatelyInvalidatesCapturedSnapshot()
+    {
+        await using Harness harness = await Harness.SynchronizedAsync();
+        Assert.True(
+            harness.Monitor.TryCaptureSynchronizedSnapshot(
+                out WatchSnapshotToken? snapshot));
+
+        harness.Source.Raise(
+            Change(FileChangeSourceEventKind.Created, 1, Harness.File("changed.txt")));
+
+        Assert.False(harness.Monitor.IsSnapshotCurrent(snapshot));
+        Assert.False(
+            harness.Monitor.RequireRescan(
+                snapshot,
+                new WatchDiagnostic(
+                    WatchDiagnosticKind.IncompleteBaseline,
+                    "A stale scan cannot invalidate a later generation.")));
+    }
+
+    [Fact]
+    public async Task CurrentSnapshotCanRequireRescanExactlyOnce()
+    {
+        await using Harness harness = await Harness.SynchronizedAsync();
+        Assert.True(
+            harness.Monitor.TryCaptureSynchronizedSnapshot(
+                out WatchSnapshotToken? snapshot));
+        WatchDiagnostic diagnostic = new(
+            WatchDiagnosticKind.IncompleteBaseline,
+            "The read-only source scan was incomplete.");
+
+        Assert.True(harness.Monitor.RequireRescan(snapshot, diagnostic));
+        Assert.False(harness.Monitor.IsSnapshotCurrent(snapshot));
+        Assert.False(harness.Monitor.RequireRescan(snapshot, diagnostic));
+        Assert.Equal(WatchRootState.RescanRequired, harness.Monitor.State);
+        Assert.Single(
+            harness.Notifications,
+            notification => ReferenceEquals(notification.Diagnostic, diagnostic));
+    }
+
+    [Fact]
     public async Task StartupRequiresUnchangedBaselineTokenBeforeSynchronization()
     {
         await using Harness harness = new();
@@ -313,6 +428,51 @@ public sealed class WatchRootMonitorTests
     }
 
     [Fact]
+    public async Task DeletingPublishedCandidateRequestsRetainedPreviewRefresh()
+    {
+        await using Harness harness = await Harness.SynchronizedAsync();
+        string path = Harness.File("published-delete.txt");
+        harness.Observations.Enqueue(path, File("published", 5), File("published", 5));
+        harness.Source.Raise(Change(FileChangeSourceEventKind.Created, 1, path));
+        await harness.Monitor.DrainAsync(TestContext.Current.CancellationToken);
+        await harness.Delay.ReleaseNextAsync(harness.Monitor);
+        await harness.Delay.ReleaseNextAsync(harness.Monitor);
+        Assert.Single(harness.Candidates);
+        harness.Notifications.Clear();
+
+        harness.Source.Raise(Change(FileChangeSourceEventKind.Deleted, 2, path));
+        await harness.Monitor.DrainAsync(TestContext.Current.CancellationToken);
+
+        WatchRootNotification refresh = Assert.Single(harness.Notifications);
+        Assert.Equal(WatchRootNotificationKind.RefreshRequested, refresh.Kind);
+        Assert.Equal(path, refresh.AffectedPath!.Value);
+        Assert.Equal(WatchRootState.Synchronized, harness.Monitor.State);
+    }
+
+    [Fact]
+    public async Task DeletingProvenPendingFileRequestsBaselinePreviewRefresh()
+    {
+        await using Harness harness = await Harness.SynchronizedAsync();
+        string path = Harness.File("baseline-pending-delete.txt");
+        harness.Observations.Enqueue(path, File("pending", 5));
+        harness.Source.Raise(Change(FileChangeSourceEventKind.Changed, 1, path));
+        await harness.Monitor.DrainAsync(TestContext.Current.CancellationToken);
+        await harness.Delay.ReleaseNextAsync(harness.Monitor);
+        Assert.Empty(harness.Candidates);
+        Assert.Single(harness.Delay.Active);
+        harness.Notifications.Clear();
+
+        harness.Source.Raise(Change(FileChangeSourceEventKind.Deleted, 2, path));
+        await harness.Monitor.DrainAsync(TestContext.Current.CancellationToken);
+
+        WatchRootNotification refresh = Assert.Single(harness.Notifications);
+        Assert.Equal(WatchRootNotificationKind.RefreshRequested, refresh.Kind);
+        Assert.Equal(path, refresh.AffectedPath!.Value);
+        Assert.Empty(harness.Delay.Active);
+        Assert.Equal(WatchRootState.Synchronized, harness.Monitor.State);
+    }
+
+    [Fact]
     public async Task RenameWithinRootFollowsNewPathAndRestartsStability()
     {
         await using Harness harness = await Harness.SynchronizedAsync();
@@ -345,6 +505,7 @@ public sealed class WatchRootMonitorTests
         await harness.Delay.ReleaseNextAsync(harness.Monitor);
         await harness.Delay.ReleaseNextAsync(harness.Monitor);
         Assert.Equal(into, Assert.Single(harness.Candidates).Path.Value);
+        harness.Notifications.Clear();
 
         string pending = Harness.File("pending.txt");
         harness.Observations.Enqueue(pending, File("pending", 1));
@@ -356,6 +517,31 @@ public sealed class WatchRootMonitorTests
 
         Assert.Equal(WatchRootState.Synchronized, harness.Monitor.State);
         Assert.Empty(harness.Delay.Active);
+        WatchRootNotification refresh = Assert.Single(harness.Notifications);
+        Assert.Equal(WatchRootNotificationKind.RefreshRequested, refresh.Kind);
+        Assert.Equal(pending, refresh.AffectedPath!.Value);
+    }
+
+    [Fact]
+    public async Task RenamingPublishedCandidateOutRequestsRetainedPreviewRefresh()
+    {
+        await using Harness harness = await Harness.SynchronizedAsync();
+        string path = Harness.File("published-rename.txt");
+        harness.Observations.Enqueue(path, File("published", 6), File("published", 6));
+        harness.Source.Raise(Change(FileChangeSourceEventKind.Created, 1, path));
+        await harness.Monitor.DrainAsync(TestContext.Current.CancellationToken);
+        await harness.Delay.ReleaseNextAsync(harness.Monitor);
+        await harness.Delay.ReleaseNextAsync(harness.Monitor);
+        Assert.Single(harness.Candidates);
+        harness.Notifications.Clear();
+
+        harness.Source.Raise(Rename(2, path, @"D:\Outside\published-rename.txt"));
+        await harness.Monitor.DrainAsync(TestContext.Current.CancellationToken);
+
+        WatchRootNotification refresh = Assert.Single(harness.Notifications);
+        Assert.Equal(WatchRootNotificationKind.RefreshRequested, refresh.Kind);
+        Assert.Equal(path, refresh.AffectedPath!.Value);
+        Assert.Equal(WatchRootState.Synchronized, harness.Monitor.State);
     }
 
     [Fact]

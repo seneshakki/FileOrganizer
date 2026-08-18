@@ -34,6 +34,11 @@ public sealed class WatchRootNotification
                 && affectedPath is null,
             WatchRootNotificationKind.Diagnostic =>
                 state is null && candidate is null && diagnostic is not null,
+            WatchRootNotificationKind.RefreshRequested =>
+                state is null
+                && candidate is null
+                && diagnostic is null
+                && affectedPath is not null,
             _ => false,
         };
         if (!valid)
@@ -59,7 +64,9 @@ public sealed class WatchRootNotification
 
     public WatchDiagnostic? Diagnostic { get; }
 
-    /// <summary>Gets a validated path only for a path-specific diagnostic.</summary>
+    /// <summary>
+    /// Gets the validated path for a path-specific diagnostic or refresh request.
+    /// </summary>
     public CanonicalPath? AffectedPath { get; }
 
     public static WatchRootNotification StateChanged(Guid watchRootId, WatchRootState state) =>
@@ -89,6 +96,28 @@ public sealed class WatchRootNotification
             null,
             null,
             diagnostic,
+            affectedPath);
+    }
+
+    /// <summary>Requests that a retained preview discard or refresh one removed file.</summary>
+    public static WatchRootNotification RefreshRequested(
+        Guid watchRootId,
+        CanonicalPath affectedPath)
+    {
+        ArgumentNullException.ThrowIfNull(affectedPath);
+        if (affectedPath.IsRoot)
+        {
+            throw new ArgumentException(
+                "A refresh request must identify an entry below the watch root.",
+                nameof(affectedPath));
+        }
+
+        return new(
+            watchRootId,
+            WatchRootNotificationKind.RefreshRequested,
+            null,
+            null,
+            null,
             affectedPath);
     }
 }
