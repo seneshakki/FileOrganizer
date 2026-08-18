@@ -4,18 +4,188 @@
         x:Class="FileOrganizer.App.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Title="{Binding Title}"
-        Width="760" Height="520"
-        MinWidth="480" MinHeight="320">
+        Width="1120" Height="760"
+        MinWidth="760" MinHeight="520"
+        Background="#0B101B">
 
-  <StackPanel Margin="32" Spacing="12" VerticalAlignment="Center">
-    <TextBlock Text="{Binding Title}"
-               FontSize="28"
-               FontWeight="SemiBold" />
-    <TextBlock Text="{Binding Summary}"
-               Opacity="0.7"
-               MaxWidth="520"
-               HorizontalAlignment="Left"
-               TextWrapping="Wrap" />
-  </StackPanel>
+  <Window.Styles>
+    <Style Selector="TextBlock">
+      <Setter Property="Foreground" Value="#E7ECF5" />
+    </Style>
+    <Style Selector="TextBlock.muted">
+      <Setter Property="Foreground" Value="#94A3B8" />
+    </Style>
+    <Style Selector="TextBlock.eyebrow">
+      <Setter Property="Foreground" Value="#7DD3FC" />
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="LetterSpacing" Value="1.4" />
+    </Style>
+    <Style Selector="Border.card">
+      <Setter Property="Background" Value="#121A29" />
+      <Setter Property="BorderBrush" Value="#263247" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="14" />
+      <Setter Property="Padding" Value="20" />
+    </Style>
+    <Style Selector="Border.metric">
+      <Setter Property="Background" Value="#0D1421" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="12" />
+    </Style>
+    <Style Selector="Button">
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="16,8" />
+    </Style>
+  </Window.Styles>
 
+  <Grid RowDefinitions="Auto,*">
+    <Border Padding="28,22" Background="#0E1625" BorderBrush="#263247" BorderThickness="0,0,0,1">
+      <Grid ColumnDefinitions="*,Auto">
+        <StackPanel Spacing="4">
+          <TextBlock Text="{Binding Title}" FontSize="25" FontWeight="SemiBold" />
+          <TextBlock Text="{Binding Subtitle}" Classes="muted" />
+        </StackPanel>
+        <Border Grid.Column="1" Background="#172A35" CornerRadius="16" Padding="12,6" VerticalAlignment="Center">
+          <TextBlock Text="PREVIEW ONLY" Classes="eyebrow" Foreground="#67E8F9" />
+        </Border>
+      </Grid>
+    </Border>
+
+    <ScrollViewer Grid.Row="1">
+      <StackPanel Margin="28" Spacing="18">
+        <Border Classes="card">
+          <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="16" RowSpacing="7">
+            <TextBlock Text="CONFIG" Classes="eyebrow" Grid.ColumnSpan="2" />
+            <TextBlock Grid.Row="1" Text="{Binding LoadState}" FontWeight="SemiBold" FontSize="18" />
+            <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding Status}" Classes="muted" TextWrapping="Wrap" />
+            <TextBlock Grid.Row="2" Grid.ColumnSpan="2" Text="{Binding ConfigurationPath}"
+                       FontFamily="Cascadia Mono, Consolas" FontSize="12" Foreground="#B6C2D4"
+                       TextWrapping="Wrap" />
+          </Grid>
+        </Border>
+
+        <Border Classes="card" IsVisible="{Binding HasProblems}" BorderBrush="#7F4A55" Background="#24161D">
+          <StackPanel Spacing="9">
+            <TextBlock Text="ATTENTION REQUIRED" Classes="eyebrow" Foreground="#FDA4AF" />
+            <ItemsControl ItemsSource="{Binding Problems}" x:CompileBindings="False">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <TextBlock Text="{Binding}" Foreground="#FECDD3" TextWrapping="Wrap" />
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+        </Border>
+
+        <Border Classes="card" IsVisible="{Binding ShowEmptyConfiguration}">
+          <StackPanel Spacing="8">
+            <TextBlock Text="NO WATCH ROOTS" Classes="eyebrow" />
+            <TextBlock Text="The configuration is valid, but it contains no watched folders."
+                       Classes="muted" TextWrapping="Wrap" />
+          </StackPanel>
+        </Border>
+
+        <ItemsControl ItemsSource="{Binding Roots}">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="vm:WatchRootViewModel">
+              <Border Classes="card" Margin="0,0,0,18">
+                <StackPanel Spacing="16">
+                  <Grid ColumnDefinitions="*,Auto" ColumnSpacing="20">
+                    <StackPanel Spacing="6">
+                      <TextBlock Text="WATCH ROOT" Classes="eyebrow" />
+                      <TextBlock Text="{Binding RootPath}" FontSize="18" FontWeight="SemiBold"
+                                 FontFamily="Cascadia Mono, Consolas" TextWrapping="Wrap" />
+                      <StackPanel Orientation="Horizontal" Spacing="14">
+                        <TextBlock Text="{Binding State}" Foreground="#7DD3FC" FontWeight="SemiBold" />
+                        <TextBlock Text="{Binding StateDescription}" Classes="muted" />
+                      </StackPanel>
+                      <StackPanel Orientation="Horizontal" Spacing="14">
+                        <TextBlock Text="{Binding IsEnabled, StringFormat='Enabled: {0}'}" Classes="muted" />
+                        <TextBlock Text="{Binding IncludeSubdirectories, StringFormat='Subdirectories: {0}'}" Classes="muted" />
+                        <TextBlock Text="{Binding Id, StringFormat='ID: {0}'}" Classes="muted" FontSize="11" />
+                      </StackPanel>
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Top">
+                      <Button Content="Pause" Command="{Binding PauseCommand}" />
+                      <Button Content="Resume" Command="{Binding ResumeCommand}" />
+                      <Button Content="Retry baseline" Command="{Binding RetryCommand}" />
+                    </StackPanel>
+                  </Grid>
+
+                  <Border Background="#0D1421" CornerRadius="8" Padding="12">
+                    <TextBlock Text="{Binding LatestDiagnostic}" Classes="muted" TextWrapping="Wrap" />
+                  </Border>
+
+                  <Grid ColumnDefinitions="*,*,*,*,*" ColumnSpacing="8">
+                    <Border Classes="metric">
+                      <StackPanel>
+                        <TextBlock Text="TOTAL" Classes="eyebrow" />
+                        <TextBlock Text="{Binding TotalCount}" FontSize="22" FontWeight="SemiBold" />
+                      </StackPanel>
+                    </Border>
+                    <Border Grid.Column="1" Classes="metric">
+                      <StackPanel>
+                        <TextBlock Text="READY" Classes="eyebrow" Foreground="#86EFAC" />
+                        <TextBlock Text="{Binding ReadyCount}" FontSize="22" FontWeight="SemiBold" />
+                      </StackPanel>
+                    </Border>
+                    <Border Grid.Column="2" Classes="metric">
+                      <StackPanel>
+                        <TextBlock Text="SKIPPED" Classes="eyebrow" Foreground="#CBD5E1" />
+                        <TextBlock Text="{Binding SkippedCount}" FontSize="22" FontWeight="SemiBold" />
+                      </StackPanel>
+                    </Border>
+                    <Border Grid.Column="3" Classes="metric">
+                      <StackPanel>
+                        <TextBlock Text="BLOCKED" Classes="eyebrow" Foreground="#FDE68A" />
+                        <TextBlock Text="{Binding BlockedCount}" FontSize="22" FontWeight="SemiBold" />
+                      </StackPanel>
+                    </Border>
+                    <Border Grid.Column="4" Classes="metric">
+                      <StackPanel>
+                        <TextBlock Text="CONFLICT" Classes="eyebrow" Foreground="#FDA4AF" />
+                        <TextBlock Text="{Binding ConflictCount}" FontSize="22" FontWeight="SemiBold" />
+                      </StackPanel>
+                    </Border>
+                  </Grid>
+
+                  <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="8">
+                    <TextBlock Text="Preview" Classes="muted" />
+                    <TextBlock Grid.Column="1" Text="{Binding PreviewOutcome}" FontWeight="SemiBold" />
+                    <TextBlock Grid.Column="2" Text="Trigger" Classes="muted" />
+                    <TextBlock Grid.Column="3" Text="{Binding PreviewTrigger}" />
+                    <TextBlock Grid.Column="4" Text="Generated" Classes="muted" />
+                    <TextBlock Grid.Column="5" Text="{Binding PlanGeneratedAt}" />
+                  </Grid>
+                  <TextBlock Text="{Binding PreviewProblem}" Classes="muted" TextWrapping="Wrap" />
+
+                  <Expander Header="Historical plan items" IsVisible="{Binding HasPlanItems}">
+                    <ItemsControl ItemsSource="{Binding PlanItems}" Margin="0,10,0,0">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:PlanItemViewModel">
+                          <Border BorderBrush="#263247" BorderThickness="0,1,0,0" Padding="0,12">
+                            <Grid ColumnDefinitions="2*,Auto,3*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="16" RowSpacing="5">
+                              <TextBlock Text="{Binding SourceName}" FontWeight="SemiBold" />
+                              <TextBlock Grid.Column="1" Text="{Binding Outcome}" Foreground="#7DD3FC" />
+                              <TextBlock Grid.Column="2" Text="{Binding Action}" HorizontalAlignment="Right" />
+                              <TextBlock Grid.Row="1" Grid.ColumnSpan="3" Text="{Binding SourcePath}" Classes="muted"
+                                         FontFamily="Cascadia Mono, Consolas" TextWrapping="Wrap" />
+                              <TextBlock Grid.Row="2" Grid.ColumnSpan="3" Text="{Binding TargetPath, StringFormat='Target: {0}'}"
+                                         Classes="muted" FontFamily="Cascadia Mono, Consolas" TextWrapping="Wrap" />
+                              <TextBlock Grid.Row="3" Grid.ColumnSpan="3" Text="{Binding Reasons}" Classes="muted" TextWrapping="Wrap" />
+                            </Grid>
+                          </Border>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </Expander>
+                </StackPanel>
+              </Border>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </StackPanel>
+    </ScrollViewer>
+  </Grid>
 </Window>

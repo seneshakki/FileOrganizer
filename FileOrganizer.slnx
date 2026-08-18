@@ -6,6 +6,7 @@
     <Project Path="src/FileOrganizer.Infrastructure/FileOrganizer.Infrastructure.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/FileOrganizer.App.Tests/FileOrganizer.App.Tests.csproj" />
     <Project Path="tests/FileOrganizer.Application.Tests/FileOrganizer.Application.Tests.csproj" />
     <Project Path="tests/FileOrganizer.Core.Tests/FileOrganizer.Core.Tests.csproj" />
     <Project Path="tests/FileOrganizer.Infrastructure.LeaseProbe/FileOrganizer.Infrastructure.LeaseProbe.csproj" />
