@@ -818,7 +818,7 @@ public sealed class WatchRootPreviewCoordinator : IAsyncDisposable
         }
 
         Publish(
-            WatchRootPreviewResult.Ready(
+            WatchRootPreviewResult.CreateReady(
                 WatchRootId,
                 request.Trigger,
                 plan,
@@ -834,7 +834,7 @@ public sealed class WatchRootPreviewCoordinator : IAsyncDisposable
         string description,
         WatchSnapshotToken? snapshotToken = null) =>
         Publish(
-            WatchRootPreviewResult.NotReady(
+            WatchRootPreviewResult.CreateNotReady(
                 WatchRootId,
                 request.Trigger,
                 outcome,

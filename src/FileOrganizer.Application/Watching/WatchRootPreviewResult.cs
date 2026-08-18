@@ -118,7 +118,11 @@ public sealed class WatchRootPreviewResult
 
     public IReadOnlyList<WatchRootPreviewProblem> Problems => _problems;
 
-    internal static WatchRootPreviewResult Ready(
+    /// <summary>
+    /// Creates a historical ready preview for presentation or runtime-boundary implementations.
+    /// The result is never authorization to execute its plan.
+    /// </summary>
+    public static WatchRootPreviewResult CreateReady(
         Guid watchRootId,
         WatchRootPreviewTrigger trigger,
         OrganizationPlan plan,
@@ -139,7 +143,11 @@ public sealed class WatchRootPreviewResult
             []);
     }
 
-    internal static WatchRootPreviewResult NotReady(
+    /// <summary>
+    /// Creates a structured historical non-ready preview for presentation or runtime fakes.
+    /// The result grants no execution capability.
+    /// </summary>
+    public static WatchRootPreviewResult CreateNotReady(
         Guid watchRootId,
         WatchRootPreviewTrigger trigger,
         WatchRootPreviewOutcome outcome,
