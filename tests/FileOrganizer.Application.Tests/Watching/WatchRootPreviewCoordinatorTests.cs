@@ -419,6 +419,15 @@ public sealed class WatchRootPreviewCoordinatorTests
         harness.Observations.Set(first);
         harness.Observations.Set(second);
         harness.Observations.Set(latest);
+        TaskCompletionSource latestCandidatePublished = NewSignal();
+        harness.Monitor.Notification += (_, notification) =>
+        {
+            if (notification.Kind == WatchRootNotificationKind.Candidate
+                && notification.Candidate?.Path.Value == latest.Path.Value)
+            {
+                latestCandidatePublished.TrySetResult();
+            }
+        };
 
         TaskCompletionSource entered = NewSignal();
         TaskCompletionSource release = NewSignal();
@@ -444,7 +453,7 @@ public sealed class WatchRootPreviewCoordinatorTests
             FileChangeSourceEventKind.Created,
             sequence: 3,
             path: latest.FullPath));
-        await harness.Monitor.DrainAsync(TestContext.Current.CancellationToken);
+        await latestCandidatePublished.Task.WaitAsync(TestContext.Current.CancellationToken);
         release.TrySetResult();
 
         WatchRootPreviewResult stale = await harness.NextResultAsync();

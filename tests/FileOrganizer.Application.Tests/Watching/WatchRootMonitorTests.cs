@@ -610,14 +610,22 @@ public sealed class WatchRootMonitorTests
             _ => PhysicalEntryObservation.Unsupported(
                 PhysicalEntryObservationReason.UnsupportedCapability),
         };
+        TaskCompletionSource<WatchRootNotification> diagnosticPublished = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Monitor.Notification += (_, notification) =>
+        {
+            if (notification.Diagnostic?.Kind == expected)
+            {
+                diagnosticPublished.TrySetResult(notification);
+            }
+        };
         harness.Observations.Enqueue(path, observation);
         harness.Source.Raise(Change(FileChangeSourceEventKind.Created, 1, path));
         await harness.Monitor.DrainAsync(TestContext.Current.CancellationToken);
         await harness.Delay.ReleaseNextAsync(harness.Monitor);
 
-        WatchRootNotification diagnostic = Assert.Single(
-            harness.Notifications,
-            notification => notification.Diagnostic?.Kind == expected);
+        WatchRootNotification diagnostic = await diagnosticPublished.Task.WaitAsync(
+            TestContext.Current.CancellationToken);
         Assert.Equal(path, diagnostic.AffectedPath!.Value);
         Assert.DoesNotContain(path, diagnostic.Diagnostic!.Description, StringComparison.Ordinal);
         Assert.Empty(harness.Candidates);
