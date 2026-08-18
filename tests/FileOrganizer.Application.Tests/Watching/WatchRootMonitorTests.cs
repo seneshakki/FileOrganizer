@@ -235,8 +235,14 @@ public sealed class WatchRootMonitorTests
         harness.Observations.Enqueue(fast, File("fast", 1), File("fast", 1));
 
         harness.Source.Raise(Change(FileChangeSourceEventKind.Created, 1, fast));
+        await harness.Delay.WaitForActiveCountAsync(
+            1,
+            TestContext.Current.CancellationToken);
         harness.Source.Raise(Change(FileChangeSourceEventKind.Created, 2, slow));
         await harness.Monitor.DrainAsync(TestContext.Current.CancellationToken);
+        await harness.Delay.WaitForActiveCountAsync(
+            2,
+            TestContext.Current.CancellationToken);
 
         await harness.Delay.ReleaseNextAsync(harness.Monitor);
         await harness.Delay.ReleaseDurationAsync(
@@ -1173,10 +1179,23 @@ public sealed class WatchRootMonitorTests
             WatchRootMonitor monitor)
         {
             Request request;
-            lock (_gate)
+            while (true)
             {
-                request = _requests.First(
-                    item => !item.Completion.Task.IsCompleted && item.Duration == duration);
+                Task requestAdded;
+                lock (_gate)
+                {
+                    Request? matching = _requests.FirstOrDefault(
+                        item => !item.Completion.Task.IsCompleted && item.Duration == duration);
+                    if (matching is not null)
+                    {
+                        request = matching;
+                        break;
+                    }
+
+                    requestAdded = _requestAdded.Task;
+                }
+
+                await requestAdded.WaitAsync(TestContext.Current.CancellationToken);
             }
 
             request.Completion.TrySetResult();
