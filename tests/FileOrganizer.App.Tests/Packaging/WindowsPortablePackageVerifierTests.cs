@@ -30,6 +30,7 @@ public sealed class WindowsPortablePackageVerifierTests
         "Fixture.Runtime.dll",
         "Fixture.Native.dll",
         "Fixture.RuntimeTarget.dll",
+        "Fixture.Data.dat",
     ];
 
     [Fact]
@@ -72,6 +73,26 @@ public sealed class WindowsPortablePackageVerifierTests
     {
         RequireWindowsPortableVerifier();
         using PackageFixture package = PackageFixture.Create(diagnosticsEnabled: true);
+
+        VerificationProcessResult result = await RunVerifierAsync(
+            package.FullPath,
+            package.ExpectedCommit);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains(
+            "diagnostics are not explicitly disabled",
+            result.Output,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("\"false\"")]
+    [InlineData("0")]
+    public async Task NonBooleanDisabledDiagnosticsValueIsRejected(string jsonLiteral)
+    {
+        RequireWindowsPortableVerifier();
+        using PackageFixture package = PackageFixture.Create(diagnosticsEnabled: false);
+        package.SetDiagnosticsJsonLiteral(jsonLiteral);
 
         VerificationProcessResult result = await RunVerifierAsync(
             package.FullPath,
@@ -224,7 +245,15 @@ public sealed class WindowsPortablePackageVerifierTests
     [InlineData("tools\\Injected.exe")]
     [InlineData("launch.cmd")]
     [InlineData("payload.ps1")]
-    public async Task UnexpectedExecutableOrAssemblyPayloadIsRejected(
+    [InlineData("support.lnk")]
+    [InlineData("support.url")]
+    [InlineData("help.chm")]
+    [InlineData("bootstrap.application")]
+    [InlineData("settings.reg")]
+    [InlineData("driver.inf")]
+    [InlineData("README.txt")]
+    [InlineData("FileOrganizer.App.runtimeconfig.dev.json")]
+    public async Task UnexpectedPackagePayloadIsRejected(
         string relativePath)
     {
         RequireWindowsPortableVerifier();
@@ -239,10 +268,61 @@ public sealed class WindowsPortablePackageVerifierTests
 
         Assert.NotEqual(0, result.ExitCode);
         Assert.Contains(
-            "Unexpected executable or assembly payloads",
+            "Unexpected package payloads",
             result.Output,
             StringComparison.OrdinalIgnoreCase);
         Assert.Contains(relativePath, result.Output, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task NamedAlternateDataStreamOnExpectedPayloadIsRejected()
+    {
+        RequireWindowsPortableVerifier();
+        using PackageFixture package = PackageFixture.Create(diagnosticsEnabled: false);
+        string volumeRoot = Path.GetPathRoot(package.FullPath)
+            ?? throw new InvalidOperationException("Temporary package has no volume root.");
+        string driveFormat;
+        try
+        {
+            driveFormat = new DriveInfo(volumeRoot).DriveFormat;
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException)
+        {
+            Assert.Skip(
+                $"The temporary package volume format is unavailable: {exception.GetType().Name}");
+            return;
+        }
+        Assert.SkipUnless(
+            string.Equals(driveFormat, "NTFS", StringComparison.OrdinalIgnoreCase),
+            "NTFS alternate-data-stream test.");
+
+        string payloadPath = Path.Combine(package.FullPath, "Fixture.Data.dat");
+        string injectedStreamPath = $"{payloadPath}:Injected";
+        try
+        {
+            File.WriteAllText(injectedStreamPath, "alternate stream fixture");
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            Assert.Skip(
+                $"Alternate data streams are unavailable: {exception.GetType().Name}");
+        }
+
+        VerificationProcessResult result = await RunVerifierAsync(
+            package.FullPath,
+            package.ExpectedCommit);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains(
+            "alternate data streams",
+            result.Output,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(
+            "Fixture.Data.dat:Injected",
+            result.Output,
+            StringComparison.Ordinal);
     }
 
     [Theory]
@@ -342,6 +422,418 @@ public sealed class WindowsPortablePackageVerifierTests
         }
     }
 
+    [Fact]
+    public void PublishScriptScansTheStagedDesktopAssemblyAndRestoresTheEnvironment()
+    {
+        string scriptPath = Path.Combine(
+            AppContext.BaseDirectory,
+            "Release",
+            "Publish-WindowsPortable.ps1");
+        Assert.True(File.Exists(scriptPath), $"Publish script was not copied to {scriptPath}.");
+        string script = File.ReadAllText(scriptPath);
+
+        const string publishedAssemblyBinding =
+            "$publishedAppAssembly = Join-Path $stagingDirectory \"FileOrganizer.App.dll\"";
+        string boundaryClassName =
+            typeof(global::FileOrganizer.App.Tests.Architecture.DesktopMutationBoundaryTests)
+                .FullName
+            ?? throw new InvalidOperationException("Desktop boundary test type has no full name.");
+        string executionBoundaryFilter =
+            $"FullyQualifiedName={boundaryClassName}."
+            + nameof(global::FileOrganizer.App.Tests.Architecture.DesktopMutationBoundaryTests
+                .ProductionAssemblyDoesNotReferenceExecutionSurfaces);
+        string mutationBoundaryFilter =
+            $"FullyQualifiedName={boundaryClassName}."
+            + nameof(global::FileOrganizer.App.Tests.Architecture.DesktopMutationBoundaryTests
+                .ProductionAssemblyDoesNotBindDirectFilesystemMutationOrEscapeApis);
+        string expectedBoundaryFilter =
+            $"{executionBoundaryFilter}|{mutationBoundaryFilter}";
+        Assert.Contains(publishedAssemblyBinding, script, StringComparison.Ordinal);
+        Assert.Contains(
+            "FILEORGANIZER_DESKTOP_ASSEMBLY_UNDER_TEST",
+            script,
+            StringComparison.Ordinal);
+        Match boundaryFilterAssignment = Regex.Match(
+            script,
+            "(?s)\\$artifactBoundaryTestFilter\\s*=\\s*"
+                + "\"(?<first>[^\"]+)\"\\s*\\+\\s*\"(?<second>[^\"]+)\"",
+            RegexOptions.CultureInvariant);
+        Assert.True(boundaryFilterAssignment.Success);
+        Assert.Equal(
+            expectedBoundaryFilter,
+            boundaryFilterAssignment.Groups["first"].Value
+                + boundaryFilterAssignment.Groups["second"].Value);
+        Assert.Contains(
+            "\"--filter\", $artifactBoundaryTestFilter",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "\"published-app-boundary-results\"",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$artifactBoundaryResultName = \"PublishedDesktopMutationBoundary.trx\"",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "\"--logger\", \"trx;LogFileName=$artifactBoundaryResultName\"",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "\"--results-directory\", $artifactBoundaryResultsDirectory",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Test-Path -LiteralPath $artifactBoundaryResultPath -PathType Leaf",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "/*[local-name()='TestRun']/*[local-name()='ResultSummary']/*[local-name()='Counters']",
+            script,
+            StringComparison.Ordinal);
+        Assert.Matches(
+            new Regex(
+                "(?s)\\$artifactBoundaryResultsDirectory\\s*=\\s*Join-Path\\s*`\\s*"
+                    + "\\$isolatedRoot\\s*`\\s*\"published-app-boundary-results\".*?"
+                    + "\\$artifactBoundaryResultPath\\s*=\\s*Join-Path\\s*`\\s*"
+                    + "\\$artifactBoundaryResultsDirectory\\s*`\\s*"
+                    + "\\$artifactBoundaryResultName",
+                RegexOptions.CultureInvariant),
+            script);
+
+        int publishIndex = script.IndexOf("& dotnet @publishArguments", StringComparison.Ordinal);
+        int assemblyBindingIndex = script.IndexOf(
+            publishedAssemblyBinding,
+            StringComparison.Ordinal);
+        int boundaryTestIndex = script.IndexOf(
+            "& dotnet @artifactBoundaryTestArguments",
+            StringComparison.Ordinal);
+        int trxExistenceIndex = script.IndexOf(
+            "Test-Path -LiteralPath $artifactBoundaryResultPath -PathType Leaf",
+            StringComparison.Ordinal);
+        int counterGateIndex = script.IndexOf(
+            "if ($artifactBoundaryTotal -ne 2 -or",
+            StringComparison.Ordinal);
+        int packageVerifierIndex = script.IndexOf("& $isolatedVerifier", StringComparison.Ordinal);
+        Assert.True(
+            publishIndex >= 0
+                && publishIndex < assemblyBindingIndex
+                && assemblyBindingIndex < boundaryTestIndex
+                && boundaryTestIndex < trxExistenceIndex
+                && trxExistenceIndex < counterGateIndex
+                && counterGateIndex < packageVerifierIndex,
+            "The published App boundary scan and TRX validation must run after publish "
+                + "and before package verification.");
+
+        Assert.Matches(
+            new Regex(
+                "(?s)if\\s*\\(\\$artifactBoundaryTotal\\s*-ne\\s*2\\s*-or\\s*"
+                    + "\\$artifactBoundaryExecuted\\s*-ne\\s*2\\s*-or\\s*"
+                    + "\\$artifactBoundaryPassed\\s*-ne\\s*2\\s*-or\\s*"
+                    + "\\$artifactBoundaryFailed\\s*-ne\\s*0\\s*\\)",
+                RegexOptions.CultureInvariant),
+            script);
+
+        Assert.Matches(
+            new Regex(
+                "(?s)\\$previousAssemblyUnderTest\\s*=\\s*"
+                    + "\\[Environment\\]::GetEnvironmentVariable\\(.*?"
+                    + "try\\s*\\{.*?"
+                    + "\\[Environment\\]::SetEnvironmentVariable\\(\\s*"
+                    + "\\$assemblyUnderTestVariable,\\s*\\$publishedAppAssembly,\\s*"
+                    + "\\[EnvironmentVariableTarget\\]::Process\\).*?"
+                    + "& dotnet @artifactBoundaryTestArguments.*?"
+                    + "\\}\\s*finally\\s*\\{\\s*"
+                    + "\\[Environment\\]::SetEnvironmentVariable\\(\\s*"
+                    + "\\$assemblyUnderTestVariable,\\s*\\$previousAssemblyUnderTest,\\s*"
+                    + "\\[EnvironmentVariableTarget\\]::Process\\)",
+                RegexOptions.CultureInvariant),
+            script);
+    }
+
+    [Fact]
+    public void VerifierUsesOrdinalFailClosedExpectedPayloadMembership()
+    {
+        string scriptPath = Path.Combine(
+            AppContext.BaseDirectory,
+            "Release",
+            "Test-WindowsPortablePackage.ps1");
+        Assert.True(File.Exists(scriptPath), $"Verifier script was not copied to {scriptPath}.");
+        string script = File.ReadAllText(scriptPath);
+
+        Assert.Matches(
+            new Regex(
+                "(?s)\\$expectedPayloadPaths\\s*=\\s*"
+                    + "\\[System\\.Collections\\.Generic\\.HashSet\\[string\\]\\]::new\\(\\s*"
+                    + "\\[StringComparer\\]::Ordinal\\)",
+                RegexOptions.CultureInvariant),
+            script);
+        Assert.Contains(
+            "-not $expectedPayloadPaths.Contains($relativePath)",
+            script,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "$relativePath -notin $expectedPayloadPaths",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "[Array]::Sort($unexpectedPayloads, [StringComparer]::Ordinal)",
+            script,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PublishScriptUsesAnIsolatedExactCommittedSourceTree()
+    {
+        string scriptPath = Path.Combine(
+            AppContext.BaseDirectory,
+            "Release",
+            "Publish-WindowsPortable.ps1");
+        Assert.True(File.Exists(scriptPath), $"Publish script was not copied to {scriptPath}.");
+        string script = File.ReadAllText(scriptPath);
+
+        Assert.Contains("function Assert-ExactCommittedSourceTree", script, StringComparison.Ordinal);
+        Assert.Contains(
+            "$isolatedGitRepository = Join-Path $isolatedRoot \"repository.git\"",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$isolatedGitTemplate = Join-Path $isolatedRoot \"git-template\"",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$null = [IO.Directory]::CreateDirectory($isolatedGitTemplate)",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "[IO.File]::WriteAllText($isolatedGitConfig, \"\")",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "[IO.File]::WriteAllText($isolatedGitAttributes, \"\")",
+            script,
+            StringComparison.Ordinal);
+
+        string cloneBlock = GetRequiredScriptSection(
+            script,
+            "$cloneOutput = @(",
+            "$cloneExitCode =");
+        foreach (string cloneContract in new[]
+                 {
+                     "--no-replace-objects",
+                     "clone",
+                     "--bare",
+                     "--no-local",
+                     "\"--template=$isolatedGitTemplate\"",
+                     "$repositoryRoot",
+                     "$isolatedGitRepository",
+                 })
+        {
+            Assert.Contains(cloneContract, cloneBlock, StringComparison.Ordinal);
+        }
+
+        string archiveBlock = GetRequiredScriptSection(
+            script,
+            "$archiveOutput = @(",
+            "$archiveExitCode =");
+        foreach (string archiveContract in new[]
+                 {
+                     "--no-replace-objects",
+                     "\"--git-dir=$isolatedGitRepository\"",
+                     "archive",
+                     "--format=zip",
+                     "\"--output=$sourceArchive\"",
+                     "$headCommit",
+                 })
+        {
+            Assert.Contains(archiveContract, archiveBlock, StringComparison.Ordinal);
+        }
+        Assert.DoesNotMatch(
+            new Regex("-C\\s+\\$repositoryRoot", RegexOptions.CultureInvariant),
+            archiveBlock);
+
+        foreach (string contract in new[]
+                 {
+                     "GIT_CONFIG_NOSYSTEM = \"1\"",
+                     "GIT_CONFIG_GLOBAL = $isolatedGitConfig",
+                     "GIT_CONFIG_COUNT = \"0\"",
+                     "GIT_CONFIG_PARAMETERS = $null",
+                     "GIT_ATTR_NOSYSTEM = \"1\"",
+                     "GIT_ATTR_SOURCE = $null",
+                     "GIT_NO_REPLACE_OBJECTS = \"1\"",
+                     "GIT_DIR = $null",
+                     "GIT_WORK_TREE = $null",
+                     "GIT_INDEX_FILE = $null",
+                     "GIT_OBJECT_DIRECTORY = $null",
+                     "GIT_ALTERNATE_OBJECT_DIRECTORIES = $null",
+                     "GIT_COMMON_DIR = $null",
+                     "GIT_NAMESPACE = $null",
+                     "GIT_REPLACE_REF_BASE = $null",
+                     "GIT_SHALLOW_FILE = $null",
+                     "GIT_EXEC_PATH = $null",
+                 })
+        {
+            Assert.Contains(contract, script, StringComparison.Ordinal);
+        }
+        Assert.Matches(
+            new Regex(
+                "(?s)foreach\\s*\\(\\$environmentName in "
+                    + "\\$gitEnvironmentOverrides\\.Keys\\).*?"
+                    + "\\[Environment\\]::SetEnvironmentVariable\\(\\s*"
+                    + "\\$environmentName,\\s*"
+                    + "\\$gitEnvironmentOverrides\\[\\$environmentName\\]",
+                RegexOptions.CultureInvariant),
+            script);
+        Assert.Matches(
+            new Regex(
+                "(?s)finally\\s*\\{\\s*foreach\\s*\\(\\$environmentName in "
+                    + "\\$appliedGitEnvironmentNames\\).*?"
+                    + "\\$previousGitEnvironment\\[\\$environmentName\\]",
+                RegexOptions.CultureInvariant),
+            script);
+
+        Assert.Contains("--no-replace-objects", script, StringComparison.Ordinal);
+        Assert.Contains("--source=$Commit", script, StringComparison.Ordinal);
+        Assert.Contains("export-ignore", script, StringComparison.Ordinal);
+        Assert.Contains("export-subst", script, StringComparison.Ordinal);
+        Assert.Contains(
+            "The committed release tree cannot use export-ignore or export-subst",
+            script,
+            StringComparison.Ordinal);
+        Assert.True(
+            Regex.Count(
+                script,
+                "\\[System\\.Collections\\.Generic\\.Dictionary\\[string, string\\]\\]::new\\(\\s*"
+                    + "\\[StringComparer\\]::Ordinal\\)",
+                RegexOptions.CultureInvariant) >= 2,
+            "Expected and extracted committed file sets must both use ordinal identity.");
+        Assert.Contains(
+            "if ($actualFiles.Count -ne $expectedFiles.Count)",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "if (-not $actualFiles.ContainsKey($expectedEntry.Key))",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$startInfo.Arguments = \"cat-file blob $ObjectId\"",
+            script,
+            StringComparison.Ordinal);
+        Assert.Matches(
+            new Regex(
+                "(?s)Write-ExactGitBlob.*?"
+                    + "-ObjectId\\s+\\$expectedEntry\\.Value.*?"
+                    + "hash-object\\s*`\\s*--no-filters.*?"
+                    + "\\[string\\]::Equals\\(\\s*\\$actualObjectId,\\s*"
+                    + "\\$expectedEntry\\.Value,\\s*\\[StringComparison\\]::Ordinal\\)",
+                RegexOptions.CultureInvariant),
+            script);
+        Assert.Contains(
+            "Assert-ExactCommittedSourceTree `",
+            script,
+            StringComparison.Ordinal);
+
+        Assert.Equal(
+            2,
+            Regex.Count(
+                script,
+                "\\.Split\\(\\s*\\[char\\[\\]\\]\\s*@\\(\\[char\\]\\s*0\\),\\s*"
+                    + "\\[StringSplitOptions\\]::RemoveEmptyEntries\\)",
+                RegexOptions.CultureInvariant));
+        Assert.DoesNotMatch(
+            new Regex(
+                "\\.Split\\(\\s*\\[char\\]\\s*0\\s*,",
+                RegexOptions.CultureInvariant),
+            script);
+
+        Assert.Matches(
+            new Regex(
+                "(?s)\\$livePublisherText\\s*=\\s*"
+                    + "\\[IO\\.File\\]::ReadAllText\\(\\$PSCommandPath\\).*?"
+                    + "\\$committedPublisherText\\s*=\\s*"
+                    + "\\[IO\\.File\\]::ReadAllText\\(\\$isolatedPublisher\\).*?"
+                    + "\\[string\\]::Equals\\(\\s*\\$livePublisherText,\\s*"
+                    + "\\$committedPublisherText,\\s*\\[StringComparison\\]::Ordinal\\).*?"
+                    + "The running publish orchestrator differs from the exact committed script",
+                RegexOptions.CultureInvariant),
+            script);
+
+        int applyEnvironmentIndex = script.IndexOf(
+            "foreach ($environmentName in $gitEnvironmentOverrides.Keys)",
+            StringComparison.Ordinal);
+        int headIndex = script.IndexOf("$headOutput = @(", StringComparison.Ordinal);
+        int cloneIndex = script.IndexOf("$cloneOutput = @(", StringComparison.Ordinal);
+        int isolatedCommitIndex = script.IndexOf(
+            "$isolatedCommitOutput = @(",
+            StringComparison.Ordinal);
+        int archiveIndex = script.IndexOf("$archiveOutput = @(", StringComparison.Ordinal);
+        int expandIndex = script.IndexOf("Expand-Archive", StringComparison.Ordinal);
+        int exactTreeIndex = script.IndexOf(
+            "    Assert-ExactCommittedSourceTree `",
+            StringComparison.Ordinal);
+        int publisherComparisonIndex = script.IndexOf(
+            "$livePublisherText =",
+            StringComparison.Ordinal);
+        int pushLocationIndex = script.IndexOf(
+            "Push-Location -LiteralPath $isolatedSource",
+            StringComparison.Ordinal);
+        int postPublishStatusIndex = script.IndexOf(
+            "$postPublishStatus = @(",
+            StringComparison.Ordinal);
+        int restoreEnvironmentIndex = script.LastIndexOf(
+            "foreach ($environmentName in $appliedGitEnvironmentNames)",
+            StringComparison.Ordinal);
+        Assert.True(
+            applyEnvironmentIndex >= 0
+                && applyEnvironmentIndex < headIndex
+                && headIndex < cloneIndex
+                && cloneIndex < isolatedCommitIndex
+                && isolatedCommitIndex < archiveIndex
+                && archiveIndex < expandIndex
+                && expandIndex < exactTreeIndex
+                && exactTreeIndex < publisherComparisonIndex
+                && publisherComparisonIndex < pushLocationIndex
+                && pushLocationIndex < postPublishStatusIndex
+                && postPublishStatusIndex < restoreEnvironmentIndex,
+            "Git isolation, exact-source reconstruction, and environment restoration "
+                + "must retain their fail-closed ordering.");
+    }
+
+    [Fact]
+    public async Task WindowsPowerShellFiveSupportsTheExplicitNulSplitOverload()
+    {
+        RequireWindowsPowerShell();
+        const string command = """
+            $sample = "first$([char] 0)second$([char] 0)"
+            $parts = $sample.Split(
+                [char[]] @([char] 0),
+                [StringSplitOptions]::RemoveEmptyEntries)
+            if ($parts.Count -ne 2 -or
+                $parts[0] -ne "first" -or
+                $parts[1] -ne "second") {
+                throw "Unexpected NUL split result."
+            }
+            Write-Output ($parts -join "|")
+            """;
+
+        VerificationProcessResult result = await RunPowerShellCommandAsync(command);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("first|second", result.Output, StringComparison.Ordinal);
+    }
+
+    private static string GetRequiredScriptSection(
+        string script,
+        string startMarker,
+        string endMarker)
+    {
+        int startIndex = script.IndexOf(startMarker, StringComparison.Ordinal);
+        Assert.True(startIndex >= 0, $"Script section start was not found: {startMarker}");
+        int endIndex = script.IndexOf(endMarker, startIndex, StringComparison.Ordinal);
+        Assert.True(endIndex > startIndex, $"Script section end was not found: {endMarker}");
+        return script.Substring(startIndex, endIndex - startIndex);
+    }
+
     private static async Task<VerificationProcessResult> RunVerifierAsync(
         string packagePath,
         string expectedCommit)
@@ -381,6 +873,36 @@ public sealed class WindowsPortablePackageVerifierTests
         {
             startInfo.ArgumentList.Add(argument);
         }
+
+        using Process process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Windows PowerShell did not start.");
+        Task<string> output = process.StandardOutput.ReadToEndAsync(
+            TestContext.Current.CancellationToken);
+        Task<string> error = process.StandardError.ReadToEndAsync(
+            TestContext.Current.CancellationToken);
+        await process.WaitForExitAsync(TestContext.Current.CancellationToken);
+
+        return new VerificationProcessResult(
+            process.ExitCode,
+            (await output) + Environment.NewLine + (await error));
+    }
+
+    private static async Task<VerificationProcessResult> RunPowerShellCommandAsync(
+        string command)
+    {
+        var startInfo = new ProcessStartInfo(GetWindowsPowerShellPath())
+        {
+            CreateNoWindow = true,
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+        };
+        startInfo.ArgumentList.Add("-NoProfile");
+        startInfo.ArgumentList.Add("-NonInteractive");
+        startInfo.ArgumentList.Add("-ExecutionPolicy");
+        startInfo.ArgumentList.Add("Bypass");
+        startInfo.ArgumentList.Add("-Command");
+        startInfo.ArgumentList.Add(command);
 
         using Process process = Process.Start(startInfo)
             ?? throw new InvalidOperationException("Windows PowerShell did not start.");
@@ -532,7 +1054,8 @@ public sealed class WindowsPortablePackageVerifierTests
                       },
                       "Fixture.Dependency/1.0.0": {
                         "runtime": {
-                          "lib/net10.0/Fixture.Runtime.dll": {}
+                          "lib/net10.0/Fixture.Runtime.dll": {},
+                          "content/Fixture.Data.dat": {}
                         },
                         "native": {
                           "runtimes/win-x64/native/Fixture.Native.dll": {},
@@ -583,6 +1106,28 @@ public sealed class WindowsPortablePackageVerifierTests
             byte[] machineBytes = BitConverter.GetBytes(machine);
             machineBytes.CopyTo(bytes, peOffset + 4);
             File.WriteAllBytes(executablePath, bytes);
+        }
+
+        public void SetDiagnosticsJsonLiteral(string jsonLiteral)
+        {
+            string runtimeConfigPath = Path.Combine(
+                FullPath,
+                "FileOrganizer.App.runtimeconfig.json");
+            string text = File.ReadAllText(runtimeConfigPath);
+            const string disabledProperty =
+                "\"Avalonia.Diagnostics.Diagnostic.IsEnabled\": false";
+            if (!text.Contains(disabledProperty, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Runtime configuration fixture is not explicitly disabled.");
+            }
+
+            File.WriteAllText(
+                runtimeConfigPath,
+                text.Replace(
+                    disabledProperty,
+                    $"\"Avalonia.Diagnostics.Diagnostic.IsEnabled\": {jsonLiteral}",
+                    StringComparison.Ordinal));
         }
 
         public void ReplaceDependencyAssetPath(string originalPath, string replacementPath)

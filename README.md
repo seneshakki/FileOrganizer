@@ -60,7 +60,13 @@ Create and verify a self-contained directory package at a new absent direct-chil
   -OutputDirectory "$PWD\artifacts\portable\win-x64-release"
 ```
 
-Run `FileOrganizer.App.exe` from the resulting directory. The package is directory-based: trimming and single-file extraction are intentionally disabled for the current Avalonia desktop build.
+Run the application with no arguments from the resulting directory:
+
+```powershell
+.\FileOrganizer.App.exe
+```
+
+The package is directory-based: trimming and single-file extraction are intentionally disabled for the current Avalonia desktop build.
 
 See [Windows portable release](docs/release.md) for the complete build gate,
 package verifier, evidence boundaries, and acceptance checklist.

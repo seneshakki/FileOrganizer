@@ -158,14 +158,94 @@ if (($packageEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw "The package directory cannot be a reparse point: $packageRoot"
 }
 
+$packageEntries = @(
+    Get-ChildItem -LiteralPath $packageRoot -Recurse -Force)
+$packagePrefix = $packageRoot + [IO.Path]::DirectorySeparatorChar
 $reparseEntries = @(
-    Get-ChildItem -LiteralPath $packageRoot -Recurse -Force |
+    $packageEntries |
         Where-Object {
             ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
         }
 )
 if ($reparseEntries.Count -ne 0) {
     throw "Reparse entries are not allowed in the package: $($reparseEntries.Name -join ', ')"
+}
+
+$namedOrUnexpectedStreams = [System.Collections.Generic.List[string]]::new()
+$streamInventoryEntries = @($packageEntry) + @($packageEntries)
+foreach ($streamInventoryEntry in $streamInventoryEntries) {
+    $isPackageRoot = [string]::Equals(
+        $streamInventoryEntry.FullName,
+        $packageRoot,
+        [StringComparison]::OrdinalIgnoreCase)
+    if (-not $isPackageRoot -and
+        -not $streamInventoryEntry.FullName.StartsWith(
+            $packagePrefix,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw "A package entry escaped the package directory while enumerating streams: $($streamInventoryEntry.FullName)"
+    }
+
+    $relativePath = if ($isPackageRoot) {
+        "."
+    }
+    else {
+        $streamInventoryEntry.FullName.Substring($packagePrefix.Length)
+    }
+
+    try {
+        $entryStreams = @(
+            Get-Item `
+                -LiteralPath $streamInventoryEntry.FullName `
+                -Stream * `
+                -ErrorAction Stop)
+    }
+    catch {
+        throw "Unable to enumerate package streams for $relativePath`: $($_.Exception.Message)"
+    }
+
+    if (-not $streamInventoryEntry.PSIsContainer) {
+        $defaultStreamCount = @(
+            $entryStreams |
+                Where-Object {
+                    [string]::Equals(
+                        [string] $_.Stream,
+                        ':$DATA',
+                        [StringComparison]::Ordinal)
+                }).Count
+        if ($defaultStreamCount -ne 1) {
+            throw "Package file does not expose exactly one default :`$DATA stream: $relativePath"
+        }
+    }
+
+    foreach ($stream in $entryStreams) {
+        $streamName = [string] $stream.Stream
+        if (-not $streamInventoryEntry.PSIsContainer -and
+            [string]::Equals(
+                $streamName,
+                ':$DATA',
+                [StringComparison]::Ordinal)) {
+            continue
+        }
+
+        $displayStreamName = if ($streamName.StartsWith(
+                ":",
+                [StringComparison]::Ordinal)) {
+            $streamName.Substring(1)
+        }
+        else {
+            $streamName
+        }
+        if ([string]::IsNullOrEmpty($displayStreamName)) {
+            $displayStreamName = "<unnamed>"
+        }
+        $namedOrUnexpectedStreams.Add(
+            "${relativePath}:$displayStreamName")
+    }
+}
+if ($namedOrUnexpectedStreams.Count -ne 0) {
+    $streamPaths = [string[]] @($namedOrUnexpectedStreams)
+    [Array]::Sort($streamPaths, [StringComparer]::Ordinal)
+    throw "Named or unexpected alternate data streams are not allowed in the package: $($streamPaths -join ', ')"
 }
 
 $requiredFiles = @(
@@ -201,12 +281,11 @@ if ($entryMachine -ne 0x8664) {
             $entryMachine)
 }
 
-$files = @(Get-ChildItem -LiteralPath $packageRoot -File -Recurse -Force)
+$files = @($packageEntries | Where-Object { -not $_.PSIsContainer })
 if ($files.Count -eq 0) {
     throw "The portable package is empty."
 }
 
-$packagePrefix = $packageRoot + [IO.Path]::DirectorySeparatorChar
 foreach ($file in $files) {
     if (-not $file.FullName.StartsWith(
             $packagePrefix,
@@ -277,7 +356,8 @@ if ($forbiddenFiles.Count -ne 0) {
 }
 
 $forbiddenDirectories = @(
-    Get-ChildItem -LiteralPath $packageRoot -Directory -Recurse -Force |
+    $packageEntries |
+        Where-Object { $_.PSIsContainer } |
         Where-Object Name -In @(".git", ".vs", "obj")
 )
 if ($forbiddenDirectories.Count -ne 0) {
@@ -346,13 +426,17 @@ foreach ($libraryProperty in @($selectedTargetProperty.Value.PSObject.Properties
     }
 }
 
-$dependencyAssetPaths = @(
-    $dependencyAssetPaths |
-        Where-Object {
-            [IO.Path]::GetExtension($_) -ne ".pdb" -and
-            [IO.Path]::GetFileName($_) -ne "_._"
-        } |
-        Sort-Object -Unique)
+$dependencyAssetPathSet =
+    [System.Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal)
+foreach ($dependencyAssetPath in $dependencyAssetPaths) {
+    if ([IO.Path]::GetExtension($dependencyAssetPath) -ne ".pdb" -and
+        [IO.Path]::GetFileName($dependencyAssetPath) -ne "_._") {
+        $null = $dependencyAssetPathSet.Add([string] $dependencyAssetPath)
+    }
+}
+$dependencyAssetPaths = [string[]] @($dependencyAssetPathSet)
+[Array]::Sort($dependencyAssetPaths, [StringComparer]::Ordinal)
 if ($dependencyAssetPaths.Count -eq 0) {
     throw "The selected dependency target does not declare publish assets: $runtimeTarget"
 }
@@ -368,51 +452,31 @@ foreach ($assetRelativePath in $dependencyAssetPaths) {
     }
 }
 
-# The dependency graph is the deterministic publish inventory for runtime and
-# native payloads. The apphost is generated by the SDK and is not a deps asset.
-$expectedPayloadPaths = @(
-    $dependencyAssetPaths + "FileOrganizer.App.exe" |
-        Sort-Object -Unique)
-$executableOrAssemblyExtensions = @(
-    ".appx",
-    ".bat",
-    ".cmd",
-    ".com",
-    ".cpl",
-    ".dll",
-    ".dylib",
-    ".exe",
-    ".hta",
-    ".jar",
-    ".js",
-    ".jse",
-    ".msi",
-    ".msix",
-    ".msp",
-    ".netmodule",
-    ".ocx",
-    ".ps1",
-    ".psd1",
-    ".psm1",
-    ".scr",
-    ".so",
-    ".vbe",
-    ".vbs",
-    ".winmd",
-    ".wsf",
-    ".wsh"
-)
-$unexpectedPayloads = @(
+# The dependency graph is the deterministic publish inventory for runtime,
+# native, resource, and passive dependency payloads. The apphost and its two
+# host configuration documents are generated by the SDK and are not deps assets.
+$expectedPayloadPaths =
+    [System.Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal)
+foreach ($dependencyAssetPath in $dependencyAssetPaths) {
+    $null = $expectedPayloadPaths.Add($dependencyAssetPath)
+}
+foreach ($generatedPayloadPath in @(
+        "FileOrganizer.App.exe",
+        "FileOrganizer.App.deps.json",
+        "FileOrganizer.App.runtimeconfig.json")) {
+    $null = $expectedPayloadPaths.Add($generatedPayloadPath)
+}
+$unexpectedPayloads = [string[]] @(
     $files |
         Where-Object {
             $relativePath = $_.FullName.Substring($packagePrefix.Length)
-            $_.Extension -in $executableOrAssemblyExtensions -and
-            $relativePath -notin $expectedPayloadPaths
+            -not $expectedPayloadPaths.Contains($relativePath)
         } |
-        ForEach-Object { $_.FullName.Substring($packagePrefix.Length) } |
-        Sort-Object -Unique)
+        ForEach-Object { $_.FullName.Substring($packagePrefix.Length) })
+[Array]::Sort($unexpectedPayloads, [StringComparer]::Ordinal)
 if ($unexpectedPayloads.Count -ne 0) {
-    throw "Unexpected executable or assembly payloads are not allowed: $($unexpectedPayloads -join ', ')"
+    throw "Unexpected package payloads are not allowed: $($unexpectedPayloads -join ', ')"
 }
 
 $runtimeConfigPath = Join-Path $packageRoot "FileOrganizer.App.runtimeconfig.json"
@@ -426,7 +490,9 @@ if ($null -eq $hasCoreFramework) {
 
 $diagnosticsProperty = $runtimeConfig.runtimeOptions.configProperties.PSObject.Properties[
     "Avalonia.Diagnostics.Diagnostic.IsEnabled"]
-if ($null -eq $diagnosticsProperty -or $diagnosticsProperty.Value -ne $false) {
+if ($null -eq $diagnosticsProperty -or
+    $diagnosticsProperty.Value -isnot [bool] -or
+    $diagnosticsProperty.Value) {
     throw "Avalonia diagnostics are not explicitly disabled in the Release runtime configuration."
 }
 

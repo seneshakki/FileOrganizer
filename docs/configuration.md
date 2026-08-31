@@ -9,7 +9,7 @@ Configuration describes planning behavior and watched roots. It does not contain
 Start the desktop application with no arguments for a first-run workspace. No configuration file is read or created until an explicit action is taken. Alternatively, load one absolute file path at startup:
 
 ```powershell
-FileOrganizer.App.exe --config "C:\FileOrganizer\config.json"
+.\FileOrganizer.App.exe --config "C:\FileOrganizer\config.json"
 ```
 
 The only accepted startup forms are no arguments or exactly `--config <absolute file path>`. A relative path, filesystem root, or any additional argument is rejected before configuration-file I/O.
@@ -348,9 +348,14 @@ On Windows, every participating FileOrganizer writer in the current login sessio
 A failure before publication preserves the previous valid file. Documented managed APIs do
 not provide an atomic compare-and-replace-by-revision operation, so a writer outside the named
 mutex protocol, including one in another Windows session, can still race the final validation
-and replacement window whether that writer is benign or malicious. The implementation also
-does not claim that a newly published directory entry survives every sudden-power-loss event
-because .NET exposes no portable directory-flush operation.
+and replacement window whether that writer is benign or malicious. Reparse and ancestor checks
+are point-in-time path observations, not a handle-pinned directory-topology guarantee. If a
+separately authorized process outside the mutex protocol replaces an ancestor during a check/use
+window, missing-directory creation, temporary-file staging, final publication, or best-effort
+temporary-file cleanup can resolve outside the originally selected directory tree. FileOrganizer
+therefore does not claim race-free containment against concurrent ancestor-topology changes. The
+implementation also does not claim that a newly published directory entry survives every
+sudden-power-loss event because .NET exposes no portable directory-flush operation.
 
 ## Version compatibility
 

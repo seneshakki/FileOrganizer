@@ -6,7 +6,7 @@ This document describes the safety properties implemented by the current codebas
 
 The watched-file workflow exposed by `FileOrganizer.App` is read-only. The application composes `WindowsWatchPreviewPipeline`, displays the latest immutable planning preview for each root as a historical observation, and exposes pause, resume, failed-source reconnect, and baseline-retry controls. It does not construct `WindowsExecutionPipeline`, call `OrganizationPlanExecutor.ExecuteAsync` or `RecoverAsync`, acquire the global execution lease, create execution journals, or invoke the native mover. There is no execute or recovery command in the current UI.
 
-The application is not globally filesystem-read-only: its explicit Open/New/Reload/Validate/Save/Revert/Import/Export configuration commands can read or atomically publish a caller-selected JSON configuration document, using a same-directory staging artifact and creating missing parent directories where needed. The selected configuration path is not prohibited from being inside a watched root. This mutation boundary is the explicitly selected configuration destination, its missing parent directories, and its staging artifact; these commands do not invoke the organization execution pipeline.
+The application is not globally filesystem-read-only: its explicit Open/New/Reload/Validate/Save/Revert/Import/Export configuration commands can read or atomically publish a caller-selected JSON configuration document, using a same-directory staging artifact and creating missing parent directories where needed. The selected configuration path is not prohibited from being inside a watched root. Under stable directory topology, the intended mutation boundary is the explicitly selected configuration destination, its missing parent directories, and its staging artifact; these commands do not invoke the organization execution pipeline.
 
 Configuration creation is no-overwrite, while Save and Import carry the exact byte revision
 captured by the last read or publication. An external edit observed before final validation
@@ -19,6 +19,12 @@ lock. Acquisition is bounded and an abandoned owner forces fresh validation.
 The revision check is not an atomic compare-and-replace primitive. A writer outside the named
 mutex protocol, including one in another Windows session, can still race the final managed-API
 window whether the writer is benign or malicious.
+
+Configuration reparse and ancestor checks are point-in-time path observations, not handle-pinned
+directory-topology guarantees. If a separately authorized process outside the FileOrganizer mutex
+protocol replaces an ancestor during a check/use window, missing-directory creation, staging,
+publication, or best-effort staging cleanup can resolve outside the originally selected directory
+tree. The desktop boundary does not claim race-free containment against that topology mutation.
 
 The repository also contains a complete move-only execution backend for future explicitly authorized integration. Merely referencing the Infrastructure assembly does not make that backend reachable from the current application composition.
 

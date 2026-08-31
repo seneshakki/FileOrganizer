@@ -6,6 +6,9 @@ namespace FileOrganizer.App.Tests.Architecture;
 
 public sealed class DesktopMutationBoundaryTests
 {
+    private const string AdditionalAssemblyUnderTestEnvironmentVariable =
+        "FILEORGANIZER_DESKTOP_ASSEMBLY_UNDER_TEST";
+
     private static readonly string[] ForbiddenExecutionNamespacePrefixes =
     [
         "FileOrganizer.Application.Execution.",
@@ -24,14 +27,41 @@ public sealed class DesktopMutationBoundaryTests
         "FileOrganizer.Infrastructure.FileSystem.WindowsRenameResult",
     ];
 
-    // These types expose both observations and mutations. A member must be on the
-    // read-only allow-list to be used by the presentation assembly. This fails
-    // closed when the BCL adds another unreviewed member name. Signatures are not
-    // intentionally treated as proof that an access-mode-dependent call is safe.
+    // These types expose mutations, often alongside observations. A member must
+    // be on the read-only allow-list to be used by the presentation assembly.
+    // This fails closed when the BCL adds another unreviewed member name.
+    // Signatures are not intentionally treated as proof that an access-mode-dependent
+    // call is safe.
     private static readonly Dictionary<string, SensitiveIoPolicy>
         SensitiveSystemIoPolicies = new Dictionary<string, SensitiveIoPolicy>(
             StringComparer.Ordinal)
         {
+            ["System.IO.Path"] = new(
+                AllowedReadOnlyMembers:
+                [
+                    "ChangeExtension",
+                    "Combine",
+                    "EndsInDirectorySeparator",
+                    "Exists",
+                    "GetDirectoryName",
+                    "GetExtension",
+                    "GetFileName",
+                    "GetFileNameWithoutExtension",
+                    "GetFullPath",
+                    "GetInvalidFileNameChars",
+                    "GetInvalidPathChars",
+                    "GetPathRoot",
+                    "GetRandomFileName",
+                    "GetRelativePath",
+                    "GetTempPath",
+                    "HasExtension",
+                    "IsPathFullyQualified",
+                    "IsPathRooted",
+                    "Join",
+                    "TrimEndingDirectorySeparator",
+                    "TryJoin",
+                ],
+                KnownMutationOrAmbiguousMembers: ["GetTempFileName"]),
             ["System.IO.File"] = new(
                 AllowedReadOnlyMembers:
                 [
@@ -214,6 +244,111 @@ public sealed class DesktopMutationBoundaryTests
                     "set_LastWriteTimeUtc",
                     "set_UnixFileMode",
                 ]),
+            ["System.IO.Compression.ZipFile"] = new(
+                AllowedReadOnlyMembers: ["OpenRead"],
+                KnownMutationOrAmbiguousMembers:
+                [
+                    "CreateFromDirectory",
+                    "CreateFromDirectoryAsync",
+                    "ExtractToDirectory",
+                    "ExtractToDirectoryAsync",
+                    "Open",
+                ]),
+            ["System.IO.Compression.ZipFileExtensions"] = new(
+                AllowedReadOnlyMembers: [],
+                KnownMutationOrAmbiguousMembers:
+                [
+                    "CreateEntryFromFile",
+                    "ExtractToDirectory",
+                    "ExtractToFile",
+                ]),
+            ["System.IO.Compression.ZipArchive"] = new(
+                AllowedReadOnlyMembers:
+                [
+                    "Dispose",
+                    "DisposeAsync",
+                    "get_Entries",
+                    "get_Mode",
+                    "GetEntry",
+                ],
+                KnownMutationOrAmbiguousMembers:
+                [
+                    // Constructor metadata does not expose the selected
+                    // ZipArchiveMode at MemberReference policy level.
+                    ".ctor",
+                    "CreateEntry",
+                ]),
+            ["System.IO.Compression.ZipArchiveEntry"] = new(
+                AllowedReadOnlyMembers:
+                [
+                    "get_Archive",
+                    "get_CompressedLength",
+                    "get_Crc32",
+                    "get_ExternalAttributes",
+                    "get_FullName",
+                    "get_LastWriteTime",
+                    "get_Length",
+                    "get_Name",
+                    "ToString",
+                ],
+                KnownMutationOrAmbiguousMembers:
+                [
+                    "Delete",
+                    "Open",
+                    "set_ExternalAttributes",
+                    "set_LastWriteTime",
+                ]),
+            ["System.Formats.Tar.TarFile"] = new(
+                AllowedReadOnlyMembers: [],
+                KnownMutationOrAmbiguousMembers:
+                [
+                    "CreateFromDirectory",
+                    "CreateFromDirectoryAsync",
+                    "ExtractToDirectory",
+                    "ExtractToDirectoryAsync",
+                ]),
+            ["System.Formats.Tar.TarEntry"] = new(
+                AllowedReadOnlyMembers:
+                [
+                    "get_Checksum",
+                    "get_DataOffset",
+                    "get_DataStream",
+                    "get_EntryType",
+                    "get_Format",
+                    "get_Gid",
+                    "get_Length",
+                    "get_LinkName",
+                    "get_Mode",
+                    "get_ModificationTime",
+                    "get_Name",
+                    "get_Uid",
+                    "ToString",
+                ],
+                KnownMutationOrAmbiguousMembers:
+                [
+                    "ExtractToFile",
+                    "ExtractToFileAsync",
+                    "set_DataStream",
+                    "set_Gid",
+                    "set_LinkName",
+                    "set_Mode",
+                    "set_ModificationTime",
+                    "set_Name",
+                    "set_Uid",
+                ]),
+            ["System.IO.MemoryMappedFiles.MemoryMappedFile"] = new(
+                AllowedReadOnlyMembers: [],
+                KnownMutationOrAmbiguousMembers:
+                [
+                    // These APIs can create or expose writable file-backed mappings.
+                    // Presentation code has no direct memory-mapping responsibility.
+                    "CreateFromFile",
+                    "CreateNew",
+                    "CreateOrOpen",
+                    "CreateViewAccessor",
+                    "CreateViewStream",
+                    "OpenExisting",
+                ]),
             ["System.IO.FileStream"] = new(
                 AllowedReadOnlyMembers:
                 [
@@ -323,15 +458,6 @@ public sealed class DesktopMutationBoundaryTests
                 ]),
         };
 
-    // Most Path operations are pure string manipulation. GetTempFileName is the
-    // notable exception because it creates a file as a side effect.
-    private static readonly Dictionary<string, HashSet<string>>
-        KnownDirectMutationMembersByType = new Dictionary<string, HashSet<string>>(
-            StringComparer.Ordinal)
-        {
-            ["System.IO.Path"] = CreateMemberSet("GetTempFileName"),
-        };
-
     // These are not normal presentation responsibilities. Unlike the strict
     // System.IO policies above, only invocation-capable members are denied so
     // benign diagnostics such as Process.GetCurrentProcess remain possible.
@@ -346,46 +472,56 @@ public sealed class DesktopMutationBoundaryTests
                 "GetFunctionPointerForDelegate"),
         };
 
-    // Any NativeLibrary call can turn a dynamically resolved export into an
-    // unreviewed native mutation path, so this type intentionally has no allow-list.
+    // These types provide no presentation-safe invocation surface. NativeLibrary
+    // can dynamically resolve an unreviewed export; Visual Basic FileSystem wraps
+    // broad copy/move/delete/write operations behind a second filesystem facade.
     private static readonly HashSet<string> FullyForbiddenInvocationTypes = new(
-        ["System.Runtime.InteropServices.NativeLibrary"],
+        [
+            "Microsoft.VisualBasic.FileSystem",
+            "Microsoft.VisualBasic.FileIO.FileSystem",
+            "System.Runtime.InteropServices.NativeLibrary",
+        ],
         StringComparer.Ordinal);
 
     [Fact]
     public void ProductionAssemblyDoesNotReferenceExecutionSurfaces()
     {
-        using FileStream assemblyStream = File.OpenRead(GetProductionAssemblyPath());
-        using var peReader = new PEReader(assemblyStream);
-        Assert.True(peReader.HasMetadata);
-
-        MetadataReader metadata = peReader.GetMetadataReader();
         List<string> violations = [];
 
-        foreach (TypeReferenceHandle handle in metadata.TypeReferences)
+        foreach (string assemblyPath in GetProductionAssemblyPaths())
         {
-            string typeName = GetTypeReferenceName(metadata, handle);
-            if (IsForbiddenExecutionType(typeName))
-            {
-                violations.Add($"type: {typeName}");
-            }
-        }
+            using FileStream assemblyStream = File.OpenRead(assemblyPath);
+            using var peReader = new PEReader(assemblyStream);
+            Assert.True(peReader.HasMetadata, $"Assembly has no metadata: {assemblyPath}");
 
-        foreach (MemberReferenceHandle handle in metadata.MemberReferences)
-        {
-            MemberReference member = metadata.GetMemberReference(handle);
-            if (member.Parent.Kind != HandleKind.TypeReference)
+            MetadataReader metadata = peReader.GetMetadataReader();
+            AssertProductionAssemblyIdentity(metadata, assemblyPath);
+            foreach (TypeReferenceHandle handle in metadata.TypeReferences)
             {
-                continue;
+                string typeName = GetTypeReferenceName(metadata, handle);
+                if (IsForbiddenExecutionType(typeName))
+                {
+                    violations.Add($"{assemblyPath}: type: {typeName}");
+                }
             }
 
-            string declaringType = GetTypeReferenceName(
-                metadata,
-                (TypeReferenceHandle)member.Parent);
-            if (IsForbiddenExecutionType(declaringType))
+            foreach (MemberReferenceHandle handle in metadata.MemberReferences)
             {
-                violations.Add(
-                    $"member: {declaringType}::{metadata.GetString(member.Name)}");
+                MemberReference member = metadata.GetMemberReference(handle);
+                if (member.Parent.Kind != HandleKind.TypeReference)
+                {
+                    continue;
+                }
+
+                string declaringType = GetTypeReferenceName(
+                    metadata,
+                    (TypeReferenceHandle)member.Parent);
+                if (IsForbiddenExecutionType(declaringType))
+                {
+                    violations.Add(
+                        $"{assemblyPath}: member: {declaringType}::"
+                            + metadata.GetString(member.Name));
+                }
             }
         }
 
@@ -401,48 +537,54 @@ public sealed class DesktopMutationBoundaryTests
     [Fact]
     public void ProductionAssemblyDoesNotBindDirectFilesystemMutationOrEscapeApis()
     {
-        using FileStream assemblyStream = File.OpenRead(GetProductionAssemblyPath());
-        using var peReader = new PEReader(assemblyStream);
-        Assert.True(peReader.HasMetadata);
-
-        MetadataReader metadata = peReader.GetMetadataReader();
         List<string> violations = [];
 
-        foreach (MemberReferenceHandle handle in metadata.MemberReferences)
+        foreach (string assemblyPath in GetProductionAssemblyPaths())
         {
-            MemberReference member = metadata.GetMemberReference(handle);
-            if (member.Parent.Kind != HandleKind.TypeReference)
+            using FileStream assemblyStream = File.OpenRead(assemblyPath);
+            using var peReader = new PEReader(assemblyStream);
+            Assert.True(peReader.HasMetadata, $"Assembly has no metadata: {assemblyPath}");
+
+            MetadataReader metadata = peReader.GetMetadataReader();
+            AssertProductionAssemblyIdentity(metadata, assemblyPath);
+            foreach (MemberReferenceHandle handle in metadata.MemberReferences)
             {
-                continue;
+                MemberReference member = metadata.GetMemberReference(handle);
+                if (member.Parent.Kind != HandleKind.TypeReference)
+                {
+                    continue;
+                }
+
+                string declaringType = GetTypeReferenceName(
+                    metadata,
+                    (TypeReferenceHandle)member.Parent);
+                string memberName = metadata.GetString(member.Name);
+                string? policyReason = GetForbiddenDirectMemberReason(
+                    declaringType,
+                    memberName);
+                if (policyReason is not null)
+                {
+                    violations.Add(
+                        $"{assemblyPath}: member: {declaringType}::{memberName} "
+                            + $"({policyReason})");
+                }
             }
 
-            string declaringType = GetTypeReferenceName(
-                metadata,
-                (TypeReferenceHandle)member.Parent);
-            string memberName = metadata.GetString(member.Name);
-            string? policyReason = GetForbiddenDirectMemberReason(
-                declaringType,
-                memberName);
-            if (policyReason is not null)
+            foreach (MethodDefinitionHandle handle in metadata.MethodDefinitions)
             {
+                MethodDefinition method = metadata.GetMethodDefinition(handle);
+                if ((method.Attributes & MethodAttributes.PinvokeImpl) == 0)
+                {
+                    continue;
+                }
+
+                MethodImport import = method.GetImport();
+                ModuleReference module = metadata.GetModuleReference(import.Module);
                 violations.Add(
-                    $"member: {declaringType}::{memberName} ({policyReason})");
+                    $"{assemblyPath}: pinvoke: {GetMethodDefinitionName(metadata, handle)} -> "
+                        + $"{metadata.GetString(module.Name)}!"
+                        + metadata.GetString(import.Name));
             }
-        }
-
-        foreach (MethodDefinitionHandle handle in metadata.MethodDefinitions)
-        {
-            MethodDefinition method = metadata.GetMethodDefinition(handle);
-            if ((method.Attributes & MethodAttributes.PinvokeImpl) == 0)
-            {
-                continue;
-            }
-
-            MethodImport import = method.GetImport();
-            ModuleReference module = metadata.GetModuleReference(import.Module);
-            violations.Add(
-                $"pinvoke: {GetMethodDefinitionName(metadata, handle)} -> "
-                    + $"{metadata.GetString(module.Name)}!{metadata.GetString(import.Name)}");
         }
 
         AssertNoViolations(
@@ -470,12 +612,33 @@ public sealed class DesktopMutationBoundaryTests
     [InlineData("System.IO.StreamWriter", ".ctor", true)]
     [InlineData("System.IO.RandomAccess", "Read", false)]
     [InlineData("System.IO.RandomAccess", "Write", true)]
+    [InlineData("System.IO.Compression.ZipFile", "OpenRead", false)]
+    [InlineData("System.IO.Compression.ZipFile", "Open", true)]
+    [InlineData("System.IO.Compression.ZipFile", "ExtractToDirectory", true)]
+    [InlineData("System.IO.Compression.ZipFile", "FutureUnreviewedMember", true)]
+    [InlineData("System.IO.Compression.ZipFileExtensions", "ExtractToFile", true)]
+    [InlineData("System.IO.Compression.ZipArchive", "GetEntry", false)]
+    [InlineData("System.IO.Compression.ZipArchive", "Dispose", false)]
+    [InlineData("System.IO.Compression.ZipArchive", "CreateEntry", true)]
+    [InlineData("System.IO.Compression.ZipArchiveEntry", "get_Name", false)]
+    [InlineData("System.IO.Compression.ZipArchiveEntry", "Open", true)]
+    [InlineData("System.Formats.Tar.TarFile", "ExtractToDirectory", true)]
+    [InlineData("System.Formats.Tar.TarEntry", "get_Name", false)]
+    [InlineData("System.Formats.Tar.TarEntry", "ExtractToFile", true)]
+    [InlineData("System.Formats.Tar.TarEntry", "ExtractToFileAsync", true)]
+    [InlineData("System.Formats.Tar.TarEntry", "FutureUnreviewedMember", true)]
+    [InlineData("System.IO.MemoryMappedFiles.MemoryMappedFile", "CreateFromFile", true)]
+    [InlineData("System.IO.FutureWriter", "WriteUserFile", true)]
+    [InlineData("System.Formats.Tar.FutureEntry", "ExtractToFile", true)]
     [InlineData("Avalonia.Platform.Storage.IStorageFile", "OpenReadAsync", false)]
     [InlineData("Avalonia.Platform.Storage.IStorageFile", "OpenWriteAsync", true)]
     [InlineData("Avalonia.Platform.Storage.IStorageItem", "DeleteAsync", true)]
     [InlineData("System.Diagnostics.Process", "GetCurrentProcess", false)]
     [InlineData("System.Diagnostics.Process", "Start", true)]
     [InlineData("Microsoft.VisualBasic.Interaction", "Shell", true)]
+    [InlineData("Microsoft.VisualBasic.FileSystem", "FileCopy", true)]
+    [InlineData("Microsoft.VisualBasic.FileSystem", "Kill", true)]
+    [InlineData("Microsoft.VisualBasic.FileIO.FileSystem", "CopyFile", true)]
     [InlineData("System.Runtime.InteropServices.NativeLibrary", "Load", true)]
     [InlineData("System.Runtime.InteropServices.Marshal", "SizeOf", false)]
     [InlineData("System.Runtime.InteropServices.Marshal", "GetDelegateForFunctionPointer", true)]
@@ -495,6 +658,51 @@ public sealed class DesktopMutationBoundaryTests
         Assert.Equal("FileOrganizer.App", assembly.GetName().Name);
         Assert.False(string.IsNullOrWhiteSpace(assembly.Location));
         return assembly.Location;
+    }
+
+    private static IReadOnlyList<string> GetProductionAssemblyPaths()
+    {
+        string loadedAssemblyPath = GetProductionAssemblyPath();
+        string? additionalAssemblyPath = Environment.GetEnvironmentVariable(
+            AdditionalAssemblyUnderTestEnvironmentVariable);
+        if (string.IsNullOrWhiteSpace(additionalAssemblyPath))
+        {
+            return [loadedAssemblyPath];
+        }
+
+        Assert.True(
+            Path.IsPathFullyQualified(additionalAssemblyPath),
+            $"{AdditionalAssemblyUnderTestEnvironmentVariable} must be a fully qualified path.");
+        string fullAdditionalAssemblyPath = Path.GetFullPath(additionalAssemblyPath);
+        Assert.True(
+            File.Exists(fullAdditionalAssemblyPath),
+            $"Additional desktop assembly does not exist: {fullAdditionalAssemblyPath}");
+        Assert.True(
+            string.Equals(
+                Path.GetFileName(fullAdditionalAssemblyPath),
+                "FileOrganizer.App.dll",
+                StringComparison.OrdinalIgnoreCase),
+            $"Additional desktop assembly must be named FileOrganizer.App.dll: "
+                + fullAdditionalAssemblyPath);
+
+        return string.Equals(
+            loadedAssemblyPath,
+            fullAdditionalAssemblyPath,
+            StringComparison.OrdinalIgnoreCase)
+                ? [loadedAssemblyPath]
+                : [loadedAssemblyPath, fullAdditionalAssemblyPath];
+    }
+
+    private static void AssertProductionAssemblyIdentity(
+        MetadataReader metadata,
+        string assemblyPath)
+    {
+        AssemblyDefinition assembly = metadata.GetAssemblyDefinition();
+        Assert.Equal("FileOrganizer.App", metadata.GetString(assembly.Name));
+        Assert.Equal(
+            "FileOrganizer.App.dll",
+            Path.GetFileName(assemblyPath),
+            ignoreCase: true);
     }
 
     private static string GetTypeReferenceName(
@@ -546,24 +754,22 @@ public sealed class DesktopMutationBoundaryTests
                 : "unreviewed member on a filesystem-sensitive type";
         }
 
-        if (KnownDirectMutationMembersByType.TryGetValue(
-                declaringType,
-                out HashSet<string>? directMutationMembers)
-            && directMutationMembers.Contains(memberName))
-        {
-            return "known filesystem mutation API";
-        }
-
         if (FullyForbiddenInvocationTypes.Contains(declaringType))
         {
-            return "dynamic native invocation API";
+            return "fully forbidden filesystem or dynamic invocation API";
         }
 
-        return ForbiddenEscapeMembersByType.TryGetValue(
+        if (ForbiddenEscapeMembersByType.TryGetValue(
                 declaringType,
                 out HashSet<string>? forbiddenMembers)
-            && forbiddenMembers.Contains(memberName)
-                ? "process or native invocation API"
+            && forbiddenMembers.Contains(memberName))
+        {
+            return "process or native invocation API";
+        }
+
+        return declaringType.StartsWith("System.IO.", StringComparison.Ordinal)
+            || declaringType.StartsWith("System.Formats.Tar.", StringComparison.Ordinal)
+                ? "unreviewed filesystem namespace member"
                 : null;
     }
 
