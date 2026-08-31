@@ -10,6 +10,29 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+function Get-Sha256Hex([string] $Path) {
+    $stream = $null
+    $algorithm = $null
+    try {
+        $stream = [IO.File]::Open(
+            $Path,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::Read)
+        $algorithm = [Security.Cryptography.SHA256]::Create()
+        return [BitConverter]::ToString(
+            $algorithm.ComputeHash($stream)).Replace("-", "")
+    }
+    finally {
+        if ($null -ne $algorithm) {
+            $algorithm.Dispose()
+        }
+        if ($null -ne $stream) {
+            $stream.Dispose()
+        }
+    }
+}
+
 function Test-FullyQualifiedPath([string] $Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) {
         return $false
@@ -260,8 +283,10 @@ $requiredFiles = @(
     "clrjit.dll",
     "hostfxr.dll",
     "hostpolicy.dll",
+    "LICENSE.txt",
     "System.Private.CoreLib.dll",
-    "System.Runtime.dll"
+    "System.Runtime.dll",
+    "THIRD-PARTY-NOTICES.txt"
 )
 foreach ($fileName in $requiredFiles) {
     $path = Join-Path $packageRoot $fileName
@@ -271,6 +296,29 @@ foreach ($fileName in $requiredFiles) {
 
     if ((Get-Item -LiteralPath $path).Length -eq 0) {
         throw "The portable package contains an empty required file: $fileName"
+    }
+}
+
+$legalSourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$legalPayloadSources = [ordered] @{
+    "LICENSE.txt" = Join-Path $legalSourceRoot "LICENSE"
+    "THIRD-PARTY-NOTICES.txt" = Join-Path $legalSourceRoot "THIRD-PARTY-NOTICES.txt"
+}
+foreach ($legalPayloadName in $legalPayloadSources.Keys) {
+    $legalSourcePath = $legalPayloadSources[$legalPayloadName]
+    if (-not (Test-Path -LiteralPath $legalSourcePath -PathType Leaf) -or
+        (Get-Item -LiteralPath $legalSourcePath).Length -eq 0) {
+        throw "The committed legal source is missing or empty: $legalSourcePath"
+    }
+
+    $legalPayloadPath = Join-Path $packageRoot $legalPayloadName
+    $sourceHash = Get-Sha256Hex $legalSourcePath
+    $payloadHash = Get-Sha256Hex $legalPayloadPath
+    if (-not [string]::Equals(
+            $sourceHash,
+            $payloadHash,
+            [StringComparison]::Ordinal)) {
+        throw "The package legal payload does not match the committed source: $legalPayloadName"
     }
 }
 
@@ -464,7 +512,9 @@ foreach ($dependencyAssetPath in $dependencyAssetPaths) {
 foreach ($generatedPayloadPath in @(
         "FileOrganizer.App.exe",
         "FileOrganizer.App.deps.json",
-        "FileOrganizer.App.runtimeconfig.json")) {
+        "FileOrganizer.App.runtimeconfig.json",
+        "LICENSE.txt",
+        "THIRD-PARTY-NOTICES.txt")) {
     $null = $expectedPayloadPaths.Add($generatedPayloadPath)
 }
 $unexpectedPayloads = [string[]] @(

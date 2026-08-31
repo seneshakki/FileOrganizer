@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "dependencies": {
+    "net10.0": {
+      "fileorganizer.application": {
+        "type": "Project",
+        "dependencies": {
+          "FileOrganizer.Core": "[0.1.0-beta.1, )"
+        }
+      },
+      "fileorganizer.core": {
+        "type": "Project"
+      },
+      "fileorganizer.infrastructure": {
+        "type": "Project",
+        "dependencies": {
+          "FileOrganizer.Application": "[0.1.0-beta.1, )",
+          "FileOrganizer.Core": "[0.1.0-beta.1, )"
+        }
+      }
+    }
+  }
+}

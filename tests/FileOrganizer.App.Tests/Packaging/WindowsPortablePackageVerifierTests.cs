@@ -33,6 +33,12 @@ public sealed class WindowsPortablePackageVerifierTests
         "Fixture.Data.dat",
     ];
 
+    private static readonly string[] RequiredLegalFiles =
+    [
+        "LICENSE.txt",
+        "THIRD-PARTY-NOTICES.txt",
+    ];
+
     [Fact]
     public async Task CompleteSelfContainedDependencyFixturePassesVerification()
     {
@@ -43,11 +49,259 @@ public sealed class WindowsPortablePackageVerifierTests
             package.FullPath,
             package.ExpectedCommit);
 
-        Assert.Equal(0, result.ExitCode);
+        Assert.True(result.ExitCode == 0, result.Output);
         Assert.Contains("SelfContained", result.Output, StringComparison.Ordinal);
         Assert.Contains("DiagnosticsEnabled", result.Output, StringComparison.Ordinal);
         Assert.Contains(package.ExpectedCommit, result.Output, StringComparison.Ordinal);
         Assert.Contains("False", result.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ReleaseAssetScriptCreatesRootedArchiveChecksumAndReverifiesPayload()
+    {
+        RequireWindowsPowerShell();
+        string artifactsRoot = Path.Combine(AppContext.BaseDirectory, "artifacts");
+        string portableRoot = Path.Combine(artifactsRoot, "portable");
+        string releaseRoot = Path.Combine(artifactsRoot, "release");
+        Assert.False(Directory.Exists(releaseRoot), $"Release fixture root already exists: {releaseRoot}");
+        Directory.CreateDirectory(portableRoot);
+
+        using PackageFixture package = PackageFixture.Create(
+            diagnosticsEnabled: false,
+            packageParent: portableRoot);
+        string productVersion = FileVersionInfo.GetVersionInfo(
+            Path.Combine(package.FullPath, "FileOrganizer.App.exe")).ProductVersion ?? "";
+        int metadataSeparator = productVersion.LastIndexOf('+');
+        Assert.True(metadataSeparator > 0, $"Fixture ProductVersion is invalid: {productVersion}");
+        string version = productVersion[..metadataSeparator];
+        string script = Path.Combine(
+            AppContext.BaseDirectory,
+            "Release",
+            "New-WindowsPortableReleaseAssets.ps1");
+
+        try
+        {
+            VerificationProcessResult result = await RunPowerShellAsync(
+                script,
+                "-PackageDirectory",
+                package.FullPath,
+                "-Version",
+                version,
+                "-ExpectedCommit",
+                package.ExpectedCommit);
+
+            Assert.True(result.ExitCode == 0, result.Output);
+            string payloadName = $"FileOrganizer-{version}-win-x64-portable";
+            string bundlePath = Path.Combine(releaseRoot, $"{payloadName}-assets");
+            string archivePath = Path.Combine(bundlePath, $"{payloadName}.zip");
+            string checksumPath = $"{archivePath}.sha256";
+            Assert.True(Directory.Exists(bundlePath));
+            Assert.True(File.Exists(archivePath));
+            Assert.True(File.Exists(checksumPath));
+            string expectedChecksum = File.ReadAllText(checksumPath).Split(
+                (char[]?)null,
+                StringSplitOptions.RemoveEmptyEntries)[0];
+            string actualChecksum = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(archivePath)));
+            Assert.Equal(actualChecksum, expectedChecksum);
+
+            using System.IO.Compression.ZipArchive archive =
+                System.IO.Compression.ZipFile.OpenRead(archivePath);
+            Assert.NotEmpty(archive.Entries);
+            Assert.All(
+                archive.Entries,
+                entry => Assert.StartsWith(
+                    $"{payloadName}/",
+                    entry.FullName.Replace('\\', '/'),
+                    StringComparison.Ordinal));
+        }
+        finally
+        {
+            if (Directory.Exists(releaseRoot))
+            {
+                Directory.Delete(releaseRoot, recursive: true);
+            }
+            if (Directory.Exists(portableRoot)
+                && !Directory.EnumerateFileSystemEntries(portableRoot).Any())
+            {
+                Directory.Delete(portableRoot);
+            }
+            if (Directory.Exists(artifactsRoot)
+                && !Directory.EnumerateFileSystemEntries(artifactsRoot).Any())
+            {
+                Directory.Delete(artifactsRoot);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ReleaseAssetScriptRejectsNonCanonicalNumericPrereleaseVersion()
+    {
+        RequireWindowsPowerShell();
+        string script = Path.Combine(
+            AppContext.BaseDirectory,
+            "Release",
+            "New-WindowsPortableReleaseAssets.ps1");
+
+        VerificationProcessResult result = await RunPowerShellAsync(
+            script,
+            "-PackageDirectory",
+            AppContext.BaseDirectory,
+            "-Version",
+            "0.1.0-01",
+            "-ExpectedCommit",
+            new string('a', 40));
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains(
+            "canonical semantic version",
+            result.Output,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ReleaseAssetScriptPreservesExistingPublishedBundle()
+    {
+        RequireWindowsPowerShell();
+        string artifactsRoot = Path.Combine(AppContext.BaseDirectory, "artifacts");
+        string portableRoot = Path.Combine(artifactsRoot, "portable");
+        string releaseRoot = Path.Combine(artifactsRoot, "release");
+        Assert.False(Directory.Exists(releaseRoot), $"Release fixture root already exists: {releaseRoot}");
+        Directory.CreateDirectory(portableRoot);
+
+        using PackageFixture package = PackageFixture.Create(
+            diagnosticsEnabled: false,
+            packageParent: portableRoot);
+        string productVersion = FileVersionInfo.GetVersionInfo(
+            Path.Combine(package.FullPath, "FileOrganizer.App.exe")).ProductVersion ?? "";
+        int metadataSeparator = productVersion.LastIndexOf('+');
+        Assert.True(metadataSeparator > 0, $"Fixture ProductVersion is invalid: {productVersion}");
+        string version = productVersion[..metadataSeparator];
+        string payloadName = $"FileOrganizer-{version}-win-x64-portable";
+        string bundlePath = Path.Combine(releaseRoot, $"{payloadName}-assets");
+        Directory.CreateDirectory(bundlePath);
+        string sentinel = Path.Combine(bundlePath, "existing.txt");
+        File.WriteAllText(sentinel, "preserve");
+        string script = Path.Combine(
+            AppContext.BaseDirectory,
+            "Release",
+            "New-WindowsPortableReleaseAssets.ps1");
+
+        try
+        {
+            VerificationProcessResult result = await RunPowerShellAsync(
+                script,
+                "-PackageDirectory",
+                package.FullPath,
+                "-Version",
+                version,
+                "-ExpectedCommit",
+                package.ExpectedCommit);
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.Contains(
+                "release asset bundle already exists",
+                result.Output,
+                StringComparison.OrdinalIgnoreCase);
+            Assert.Equal("preserve", File.ReadAllText(sentinel));
+            Assert.Equal([sentinel], Directory.EnumerateFiles(bundlePath));
+        }
+        finally
+        {
+            if (Directory.Exists(releaseRoot))
+            {
+                Directory.Delete(releaseRoot, recursive: true);
+            }
+            if (Directory.Exists(portableRoot)
+                && !Directory.EnumerateFileSystemEntries(portableRoot).Any())
+            {
+                Directory.Delete(portableRoot);
+            }
+            if (Directory.Exists(artifactsRoot)
+                && !Directory.EnumerateFileSystemEntries(artifactsRoot).Any())
+            {
+                Directory.Delete(artifactsRoot);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ReleaseAssetScriptRejectsReparseAncestorWithoutWritingThroughIt()
+    {
+        RequireWindowsPowerShell();
+        string artifactsRoot = Path.Combine(AppContext.BaseDirectory, "artifacts");
+        string portableRoot = Path.Combine(artifactsRoot, "portable");
+        string releaseRoot = Path.Combine(artifactsRoot, "release");
+        Directory.CreateDirectory(artifactsRoot);
+        Assert.False(Directory.Exists(releaseRoot), $"Release fixture root already exists: {releaseRoot}");
+        if (Directory.Exists(portableRoot))
+        {
+            Assert.Empty(Directory.EnumerateFileSystemEntries(portableRoot));
+            Assert.False(
+                (File.GetAttributes(portableRoot) & FileAttributes.ReparsePoint) != 0,
+                $"Portable fixture root is unexpectedly a reparse point: {portableRoot}");
+            Directory.Delete(portableRoot);
+        }
+        string externalRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"fileorganizer-release-assets-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(externalRoot);
+
+        try
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(portableRoot, externalRoot);
+            }
+            catch (Exception exception) when (
+                exception is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+            {
+                Assert.Skip(
+                    $"Symbolic links are unavailable in this test environment: {exception.GetType().Name}");
+            }
+
+            using PackageFixture package = PackageFixture.Create(
+                diagnosticsEnabled: false,
+                packageParent: portableRoot);
+            string productVersion = FileVersionInfo.GetVersionInfo(
+                Path.Combine(package.FullPath, "FileOrganizer.App.exe")).ProductVersion ?? "";
+            int metadataSeparator = productVersion.LastIndexOf('+');
+            Assert.True(metadataSeparator > 0, $"Fixture ProductVersion is invalid: {productVersion}");
+            string version = productVersion[..metadataSeparator];
+            string script = Path.Combine(
+                AppContext.BaseDirectory,
+                "Release",
+                "New-WindowsPortableReleaseAssets.ps1");
+
+            VerificationProcessResult result = await RunPowerShellAsync(
+                script,
+                "-PackageDirectory",
+                package.FullPath,
+                "-Version",
+                version,
+                "-ExpectedCommit",
+                package.ExpectedCommit);
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.Contains("reparse point", result.Output, StringComparison.OrdinalIgnoreCase);
+            Assert.False(Directory.Exists(releaseRoot));
+        }
+        finally
+        {
+            if (Directory.Exists(portableRoot))
+            {
+                Directory.Delete(portableRoot);
+            }
+            if (Directory.Exists(externalRoot))
+            {
+                Directory.Delete(externalRoot, recursive: true);
+            }
+            if (Directory.Exists(artifactsRoot)
+                && !Directory.EnumerateFileSystemEntries(artifactsRoot).Any())
+            {
+                Directory.Delete(artifactsRoot);
+            }
+        }
     }
 
     [Fact]
@@ -168,6 +422,43 @@ public sealed class WindowsPortablePackageVerifierTests
             "does not identify exact expected SourceRevisionId",
             result.Output,
             StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [MemberData(nameof(RequiredLegalPayloads))]
+    public async Task MissingRequiredLegalPayloadIsRejected(string fileName)
+    {
+        RequireWindowsPortableVerifier();
+        using PackageFixture package = PackageFixture.Create(diagnosticsEnabled: false);
+        File.Delete(Path.Combine(package.FullPath, fileName));
+
+        VerificationProcessResult result = await RunVerifierAsync(
+            package.FullPath,
+            package.ExpectedCommit);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("missing required file", result.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(fileName, result.Output, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [MemberData(nameof(RequiredLegalPayloads))]
+    public async Task ModifiedLegalPayloadIsRejected(string fileName)
+    {
+        RequireWindowsPortableVerifier();
+        using PackageFixture package = PackageFixture.Create(diagnosticsEnabled: false);
+        File.AppendAllText(Path.Combine(package.FullPath, fileName), "tampered");
+
+        VerificationProcessResult result = await RunVerifierAsync(
+            package.FullPath,
+            package.ExpectedCommit);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains(
+            "does not match the committed source",
+            result.Output,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(fileName, result.Output, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -549,6 +840,61 @@ public sealed class WindowsPortablePackageVerifierTests
                     + "-Value\\s+\\$previousAssemblyUnderTest",
                 RegexOptions.CultureInvariant),
             script);
+    }
+
+    [Fact]
+    public void PublishScriptFailsClosedOnNuGetAuditSchemaAndExactProjectSet()
+    {
+        string scriptPath = Path.Combine(
+            AppContext.BaseDirectory,
+            "Release",
+            "Publish-WindowsPortable.ps1");
+        Assert.True(File.Exists(scriptPath), $"Publish script was not copied to {scriptPath}.");
+        string script = File.ReadAllText(scriptPath);
+
+        Assert.Contains(
+            "ConvertFrom-Json -InputObject $auditText",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "[int] $auditDocument.version -ne 1",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$actualAuditProjects.Count -ne $expectedAuditProjects.Count",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$auditText -match '\"vulnerabilities\"\\s*:'",
+            script,
+            StringComparison.Ordinal);
+
+        string[] expectedProjects =
+        [
+            "FileOrganizer.App.csproj",
+            "FileOrganizer.Application.csproj",
+            "FileOrganizer.Core.csproj",
+            "FileOrganizer.Infrastructure.csproj",
+            "FileOrganizer.App.Tests.csproj",
+            "FileOrganizer.Application.Tests.csproj",
+            "FileOrganizer.Core.Tests.csproj",
+            "FileOrganizer.Infrastructure.LeaseProbe.csproj",
+            "FileOrganizer.Infrastructure.Tests.csproj",
+        ];
+        Assert.All(
+            expectedProjects,
+            project => Assert.Contains(project, script, StringComparison.Ordinal));
+
+        int restoreIndex = script.IndexOf(
+            "& dotnet @solutionRestoreArguments",
+            StringComparison.Ordinal);
+        int auditIndex = script.IndexOf(
+            "$auditOutput = @(& dotnet @auditArguments)",
+            StringComparison.Ordinal);
+        int buildIndex = script.IndexOf("& dotnet @buildArguments", StringComparison.Ordinal);
+        Assert.True(
+            restoreIndex >= 0 && restoreIndex < auditIndex && auditIndex < buildIndex,
+            "The validated vulnerability audit must run after locked restore and before build.");
     }
 
     [Fact]
@@ -952,25 +1298,42 @@ public sealed class WindowsPortablePackageVerifierTests
             "powershell.exe");
     }
 
+    public static TheoryData<string> RequiredLegalPayloads => new()
+    {
+        "LICENSE.txt",
+        "THIRD-PARTY-NOTICES.txt",
+    };
+
     private sealed record VerificationProcessResult(int ExitCode, string Output);
 
     private sealed class PackageFixture : IDisposable
     {
-        private PackageFixture(string fullPath, string expectedCommit)
+        private readonly string? _emptyParentToDelete;
+
+        private PackageFixture(
+            string fullPath,
+            string expectedCommit,
+            string? emptyParentToDelete)
         {
             FullPath = fullPath;
             ExpectedCommit = expectedCommit;
+            _emptyParentToDelete = emptyParentToDelete;
         }
 
         public string FullPath { get; }
 
         public string ExpectedCommit { get; }
 
-        public static PackageFixture Create(bool diagnosticsEnabled)
+        public static PackageFixture Create(
+            bool diagnosticsEnabled,
+            string? packageParent = null)
         {
+            string? emptyParentToDelete = packageParent is null
+                ? Path.Combine(Path.GetTempPath(), "fileorganizer-release-tests")
+                : null;
+            packageParent ??= emptyParentToDelete;
             string fullPath = Path.Combine(
-                Path.GetTempPath(),
-                "fileorganizer-release-tests",
+                packageParent!,
                 Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(fullPath);
             foreach (string fileName in RequiredBinaryFiles.Where(
@@ -998,6 +1361,19 @@ public sealed class WindowsPortablePackageVerifierTests
                 }
 
                 File.Copy(sourcePath, Path.Combine(fullPath, firstPartyBinary));
+            }
+
+            foreach (string legalFile in RequiredLegalFiles)
+            {
+                string sourceName = string.Equals(
+                    legalFile,
+                    "LICENSE.txt",
+                    StringComparison.Ordinal)
+                    ? "LICENSE"
+                    : legalFile;
+                File.Copy(
+                    Path.Combine(AppContext.BaseDirectory, sourceName),
+                    Path.Combine(fullPath, legalFile));
             }
 
             string sourceAssembly = Path.Combine(
@@ -1101,7 +1477,7 @@ public sealed class WindowsPortablePackageVerifierTests
                 }
                 """);
 
-            return new PackageFixture(fullPath, expectedCommit);
+            return new PackageFixture(fullPath, expectedCommit, emptyParentToDelete);
         }
 
         public void SetEntryExecutableMachine(ushort machine)
@@ -1158,6 +1534,19 @@ public sealed class WindowsPortablePackageVerifierTests
             if (Directory.Exists(FullPath))
             {
                 Directory.Delete(FullPath, recursive: true);
+            }
+            if (_emptyParentToDelete is not null
+                && Directory.Exists(_emptyParentToDelete)
+                && !Directory.EnumerateFileSystemEntries(_emptyParentToDelete).Any())
+            {
+                try
+                {
+                    Directory.Delete(_emptyParentToDelete);
+                }
+                catch (IOException)
+                {
+                    // Another test process may have populated the shared temp parent.
+                }
             }
         }
     }

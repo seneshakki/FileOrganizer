@@ -1,15 +1,14 @@
 # Windows portable release
 
-This document describes the local, directory-based Windows x64 release workflow.
-It does not authorize an installer, code signing, uploading, pushing, or any other
-external publication.
+This document describes the local, directory-based Windows x64 release workflow
+and the guarded GitHub prerelease workflow. Running a local package command does
+not itself publish, install, or sign anything.
 
 ## Prerequisites
 
 - Run the commands from the repository root on Windows.
-- Install a .NET SDK accepted by `global.json`. The requested SDK is .NET SDK
-  `10.0.302`; `latestFeature` roll-forward is enabled and prerelease SDKs are not
-  accepted.
+- Install the exact .NET SDK selected by `global.json`: .NET SDK `10.0.302`.
+  SDK roll-forward and prerelease SDKs are disabled.
 - Ensure `dotnet`, Git, and PowerShell are available on `PATH`.
 - Allow access to `https://api.nuget.org/v3/index.json`. The authoritative
   publish uses an empty isolated package cache, disables the HTTP cache, and
@@ -23,7 +22,9 @@ external publication.
 The following commands are useful as a fast local preflight:
 
 ```powershell
-dotnet restore FileOrganizer.slnx
+dotnet restore FileOrganizer.slnx `
+  --locked-mode `
+  --configfile scripts/NuGet.Release.Config
 dotnet build FileOrganizer.slnx --no-restore
 dotnet test FileOrganizer.slnx --no-build
 ```
@@ -62,7 +63,8 @@ the script performs the full Release build/test gate, a `win-x64` restore, a
 self-contained publish, a focused mutation-boundary scan of the exact published
 `FileOrganizer.App.dll`, and package verification. Persistent build servers are
 disabled so isolated package files are not retained by reused MSBuild nodes. The
-second command is an explicit, repeatable re-verification step.
+solution and RID restores are locked to the committed lock files. The second
+command is an explicit, repeatable re-verification step.
 
 For another local candidate, select a new absolute direct child of
 `artifacts\portable`:
@@ -148,6 +150,9 @@ The accepted package is:
   excluded.
 - Built with Avalonia diagnostics explicitly disabled in the runtime
   configuration and excluded from the dependency graph.
+- Contains the repository's exact MIT `LICENSE.txt` and
+  `THIRD-PARTY-NOTICES.txt`; missing, empty, or modified legal payloads are
+  rejected.
 - Every first-party `FileOrganizer` executable and assembly identifies the exact
   expected 40-character Git commit in `ProductVersion`.
 - The exact RID-specific `FileOrganizer.App.dll` produced for the candidate is
@@ -178,7 +183,43 @@ application, create such a manifest, or prove code-signing status.
 
 This workflow does not create an installer and does not sign the executable.
 Windows reputation or publisher warnings therefore remain possible. Do not
-describe the folder as installed, signed, or publicly released.
+describe the folder as installed or signed.
+
+## Release archive and GitHub prerelease
+
+After the directory package passes verification, create a rooted ZIP and its
+SHA-256 checksum from a new absent release path:
+
+```powershell
+$version = '0.1.0-beta.1'
+$expectedCommit = (git rev-parse --verify HEAD).Trim().ToLowerInvariant()
+$packagePath = [IO.Path]::GetFullPath(
+    "artifacts\portable\FileOrganizer-$version-win-x64-portable")
+
+.\scripts\Publish-WindowsPortable.ps1 -OutputDirectory $packagePath
+.\scripts\New-WindowsPortableReleaseAssets.ps1 `
+    -PackageDirectory $packagePath `
+    -Version $version `
+    -ExpectedCommit $expectedCommit
+```
+
+The asset script verifies the source directory, requires an exact
+`ProductVersion` of `<version>+<commit>`, creates one top-level payload directory,
+extracts the archive into isolated staging, re-verifies that extracted payload,
+and writes the ZIP checksum. The ZIP and checksum are published together through
+one no-replace directory move into
+`artifacts\release\FileOrganizer-<version>-win-x64-portable-assets`; failures clean
+only the unique staging directory and preserve any competing published bundle.
+
+`.github/workflows/release.yml` is a manual workflow. Its read-only build job
+accepts only an existing semantic-version tag, checks out that tag, proves that
+the dispatch ref and input name the same tag, proves that the tag commit equals
+`HEAD` and is reachable from remote `main`, requires the tag version to equal the
+project version, and repeats the full isolated publish and asset gate. It stages an
+immutable short-lived workflow artifact. A separate publish job rechecks the
+bundle inventory, ZIP checksum, and remote tag-to-commit binding before creating
+a GitHub prerelease for prerelease versions. Only that final publish job receives
+`contents: write`, and the token is exposed only to the release-publication step.
 
 ## Smoke-test evidence boundaries
 
@@ -219,11 +260,15 @@ physical execution pipeline.
       `SelfContained = True`, and `DiagnosticsEnabled = False`.
 - [ ] The candidate contains no unexpected source, symbol, secret-bearing, or
       repository files.
+- [ ] `LICENSE.txt` and `THIRD-PARTY-NOTICES.txt` exactly match their committed
+      sources.
+- [ ] The rooted release ZIP was extracted and re-verified, and its SHA-256 file
+      matches the uploaded ZIP.
 - [ ] Runtime smoke evidence is recorded with its exact host and observation
       boundaries; unperformed visual checks are marked **Not Tested**.
 - [ ] `git status` and the mutation-boundary audit were reviewed after packaging.
-- [ ] No installer, signing, upload, Git remote, or external publication action
-      was performed by this workflow.
+- [ ] Any GitHub release is marked prerelease when its version contains a
+      prerelease suffix; unsigned status and UI limitations remain disclosed.
 
 ## Cleanup
 
@@ -233,6 +278,9 @@ wildcard. The only release-related cleanup locations are:
 
 - `artifacts\portable\win-x64`
 - `artifacts\portable\<candidate-name>`
+- `artifacts\release\FileOrganizer-<version>-win-x64-portable-assets`
+- `artifacts\release\.FileOrganizer-release-assets-<exact-guid>` only when an
+  exact asset-cleanup warning reports that it remains
 - `artifacts\portable\.FileOrganizer-staging-<exact-guid>` only when an exact
   staging-cleanup warning reports that it remains
 - `artifacts\publish-probe-win-x64`

@@ -32,6 +32,11 @@
 
   <PropertyGroup>
     <Product>FileOrganizer</Product>
+    <VersionPrefix>0.1.0</VersionPrefix>
+    <VersionSuffix>beta.1</VersionSuffix>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <NuGetLockFilePath Condition="'$(RuntimeIdentifier)' != ''">$(MSBuildProjectDirectory)\packages.$(RuntimeIdentifier).lock.json</NuGetLockFilePath>
+    <NuGetLockFilePath Condition="'$(RuntimeIdentifier)' == '' and '$(RuntimeIdentifiers)' == 'win-x64'">$(MSBuildProjectDirectory)\packages.win-x64.lock.json</NuGetLockFilePath>
     <NeutralLanguage>en</NeutralLanguage>
     <Deterministic>true</Deterministic>
   </PropertyGroup>

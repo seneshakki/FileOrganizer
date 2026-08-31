@@ -553,7 +553,7 @@ try {
         "--packages", $isolatedPackages,
         "--configfile", $isolatedNuGetConfig,
         "--no-cache",
-        "--force-evaluate",
+        "--locked-mode",
         "--disable-build-servers",
         "-p:DirectoryBuildPropsPath=$isolatedBuildProps",
         "-p:DirectoryPackagesPropsPath=$isolatedPackagesProps",
@@ -562,6 +562,87 @@ try {
     & dotnet @solutionRestoreArguments
     if ($LASTEXITCODE -ne 0) {
         throw "The isolated solution restore failed with exit code $LASTEXITCODE."
+    }
+
+    $auditArguments = @(
+        "package",
+        "list",
+        "--project", $isolatedSolution,
+        "--vulnerable",
+        "--include-transitive",
+        "--no-restore",
+        "--config", $isolatedNuGetConfig,
+        "--format", "json",
+        "--output-version", "1"
+    )
+    $auditOutput = @(& dotnet @auditArguments)
+    if ($LASTEXITCODE -ne 0) {
+        throw "The isolated NuGet vulnerability audit failed with exit code $LASTEXITCODE."
+    }
+    $auditText = $auditOutput -join [Environment]::NewLine
+    try {
+        $auditDocument = ConvertFrom-Json -InputObject $auditText
+    }
+    catch {
+        throw "The isolated NuGet vulnerability audit returned malformed JSON: $($_.Exception.Message)"
+    }
+    if ($null -eq $auditDocument -or
+        $null -eq $auditDocument.PSObject.Properties["version"] -or
+        [int] $auditDocument.version -ne 1 -or
+        $null -eq $auditDocument.PSObject.Properties["projects"] -or
+        $null -eq $auditDocument.PSObject.Properties["sources"]) {
+        throw "The isolated NuGet vulnerability audit returned an unsupported JSON schema."
+    }
+
+    $auditSources = @($auditDocument.sources)
+    if ($auditSources.Count -ne 1 -or
+        -not [string]::Equals(
+            [string] $auditSources[0],
+            "https://api.nuget.org/v3/index.json",
+            [StringComparison]::Ordinal)) {
+        throw "The isolated NuGet vulnerability audit used an unexpected package source."
+    }
+
+    $expectedAuditProjectPaths = @(
+        "src\FileOrganizer.App\FileOrganizer.App.csproj",
+        "src\FileOrganizer.Application\FileOrganizer.Application.csproj",
+        "src\FileOrganizer.Core\FileOrganizer.Core.csproj",
+        "src\FileOrganizer.Infrastructure\FileOrganizer.Infrastructure.csproj",
+        "tests\FileOrganizer.App.Tests\FileOrganizer.App.Tests.csproj",
+        "tests\FileOrganizer.Application.Tests\FileOrganizer.Application.Tests.csproj",
+        "tests\FileOrganizer.Core.Tests\FileOrganizer.Core.Tests.csproj",
+        "tests\FileOrganizer.Infrastructure.LeaseProbe\FileOrganizer.Infrastructure.LeaseProbe.csproj",
+        "tests\FileOrganizer.Infrastructure.Tests\FileOrganizer.Infrastructure.Tests.csproj"
+    )
+    $expectedAuditProjects = [System.Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase)
+    foreach ($relativeProjectPath in $expectedAuditProjectPaths) {
+        $null = $expectedAuditProjects.Add(
+            [IO.Path]::GetFullPath((Join-Path $isolatedSource $relativeProjectPath)))
+    }
+    $actualAuditProjects = [System.Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase)
+    foreach ($auditProject in @($auditDocument.projects)) {
+        if ($null -eq $auditProject -or
+            $null -eq $auditProject.PSObject.Properties["path"] -or
+            [string]::IsNullOrWhiteSpace([string] $auditProject.path)) {
+            throw "The isolated NuGet vulnerability audit returned a project without a path."
+        }
+        $actualAuditProject = [IO.Path]::GetFullPath([string] $auditProject.path)
+        if (-not $actualAuditProjects.Add($actualAuditProject)) {
+            throw "The isolated NuGet vulnerability audit returned a duplicate project: $actualAuditProject"
+        }
+    }
+    if ($actualAuditProjects.Count -ne $expectedAuditProjects.Count) {
+        throw "The isolated NuGet vulnerability audit returned an incomplete project set."
+    }
+    foreach ($expectedAuditProject in $expectedAuditProjects) {
+        if (-not $actualAuditProjects.Contains($expectedAuditProject)) {
+            throw "The isolated NuGet vulnerability audit omitted project: $expectedAuditProject"
+        }
+    }
+    if ($auditText -match '"vulnerabilities"\s*:') {
+        throw "The isolated dependency graph contains a known vulnerability."
     }
 
     $buildArguments = @(
@@ -604,7 +685,7 @@ try {
         "--packages", $isolatedPackages,
         "--configfile", $isolatedNuGetConfig,
         "--no-cache",
-        "--force-evaluate",
+        "--locked-mode",
         "--disable-build-servers",
         "-p:DirectoryBuildPropsPath=$isolatedBuildProps",
         "-p:DirectoryPackagesPropsPath=$isolatedPackagesProps",
@@ -740,9 +821,6 @@ try {
     & $isolatedVerifier `
         -PackageDirectory $stagingDirectory `
         -ExpectedCommit $headCommit
-    if ($LASTEXITCODE -ne 0) {
-        throw "Portable package verification failed with exit code $LASTEXITCODE."
-    }
 
     if (Test-Path -LiteralPath $packageDirectory) {
         throw "The package output appeared before publication; refusing replacement: $packageDirectory"
@@ -758,9 +836,6 @@ try {
     & $isolatedVerifier `
         -PackageDirectory $packageDirectory `
         -ExpectedCommit $headCommit
-    if ($LASTEXITCODE -ne 0) {
-        throw "Published portable package verification failed with exit code $LASTEXITCODE."
-    }
 }
 finally {
     if ($locationPushed) {

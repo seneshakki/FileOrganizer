@@ -52,6 +52,17 @@
     <ProjectReference Include="..\FileOrganizer.Infrastructure\FileOrganizer.Infrastructure.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="..\..\LICENSE"
+             Link="LICENSE.txt"
+             CopyToOutputDirectory="Never"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\THIRD-PARTY-NOTICES.txt"
+             Link="THIRD-PARTY-NOTICES.txt"
+             CopyToOutputDirectory="Never"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <!-- Some native Avalonia dependencies classify large PDBs as native runtime
        assets. They are not needed in the portable end-user package. -->
   <Target Name="RemoveNativeSymbolsFromPortablePublish"
