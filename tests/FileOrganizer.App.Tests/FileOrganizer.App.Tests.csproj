@@ -20,4 +20,13 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="..\..\scripts\Publish-WindowsPortable.ps1"
+          Link="Release\Publish-WindowsPortable.ps1"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\scripts\Test-WindowsPortablePackage.ps1"
+          Link="Release\Test-WindowsPortablePackage.ps1"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
