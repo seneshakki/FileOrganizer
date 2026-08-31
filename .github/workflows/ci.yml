@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Windows build and tests
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install repository SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        shell: pwsh
+        run: >-
+          dotnet restore FileOrganizer.slnx
+          --locked-mode
+          --configfile scripts/NuGet.Release.Config
+          --disable-build-servers
+
+      - name: Audit vulnerable packages
+        shell: pwsh
+        run: |
+          $audit = & dotnet package list `
+            --project FileOrganizer.slnx `
+            --vulnerable `
+            --include-transitive `
+            --no-restore `
+            --config scripts/NuGet.Release.Config `
+            --format json `
+            --output-version 1
+          if ($LASTEXITCODE -ne 0) {
+            throw "NuGet vulnerability audit failed with exit code $LASTEXITCODE."
+          }
+          $auditText = $audit -join [Environment]::NewLine
+          try {
+            $auditDocument = ConvertFrom-Json -InputObject $auditText
+          }
+          catch {
+            throw "NuGet vulnerability audit returned malformed JSON: $($_.Exception.Message)"
+          }
+          if ($null -eq $auditDocument -or
+              $null -eq $auditDocument.PSObject.Properties["version"] -or
+              [int] $auditDocument.version -ne 1 -or
+              $null -eq $auditDocument.PSObject.Properties["projects"] -or
+              $null -eq $auditDocument.PSObject.Properties["sources"]) {
+            throw "NuGet vulnerability audit returned an unsupported JSON schema."
+          }
+          $auditSources = @($auditDocument.sources)
+          if ($auditSources.Count -ne 1 -or
+              -not [string]::Equals(
+                [string] $auditSources[0],
+                "https://api.nuget.org/v3/index.json",
+                [StringComparison]::Ordinal)) {
+            throw "NuGet vulnerability audit used an unexpected package source."
+          }
+
+          $expectedProjectPaths = @(
+            "src/FileOrganizer.App/FileOrganizer.App.csproj",
+            "src/FileOrganizer.Application/FileOrganizer.Application.csproj",
+            "src/FileOrganizer.Core/FileOrganizer.Core.csproj",
+            "src/FileOrganizer.Infrastructure/FileOrganizer.Infrastructure.csproj",
+            "tests/FileOrganizer.App.Tests/FileOrganizer.App.Tests.csproj",
+            "tests/FileOrganizer.Application.Tests/FileOrganizer.Application.Tests.csproj",
+            "tests/FileOrganizer.Core.Tests/FileOrganizer.Core.Tests.csproj",
+            "tests/FileOrganizer.Infrastructure.LeaseProbe/FileOrganizer.Infrastructure.LeaseProbe.csproj",
+            "tests/FileOrganizer.Infrastructure.Tests/FileOrganizer.Infrastructure.Tests.csproj")
+          $expectedProjects = [System.Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::OrdinalIgnoreCase)
+          foreach ($relativeProjectPath in $expectedProjectPaths) {
+            $null = $expectedProjects.Add(
+              [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE $relativeProjectPath)))
+          }
+          $actualProjects = [System.Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::OrdinalIgnoreCase)
+          foreach ($project in @($auditDocument.projects)) {
+            if ($null -eq $project -or
+                $null -eq $project.PSObject.Properties["path"] -or
+                [string]::IsNullOrWhiteSpace([string] $project.path)) {
+              throw "NuGet vulnerability audit returned a project without a path."
+            }
+            $projectPath = [IO.Path]::GetFullPath([string] $project.path)
+            if (-not $actualProjects.Add($projectPath)) {
+              throw "NuGet vulnerability audit returned a duplicate project: $projectPath"
+            }
+          }
+          if ($actualProjects.Count -ne $expectedProjects.Count) {
+            throw "NuGet vulnerability audit returned an incomplete project set."
+          }
+          foreach ($expectedProject in $expectedProjects) {
+            if (-not $actualProjects.Contains($expectedProject)) {
+              throw "NuGet vulnerability audit omitted project: $expectedProject"
+            }
+          }
+          if ($auditText -match '"vulnerabilities"\s*:') {
+            Write-Output $auditText
+            throw "A direct or transitive package has a known vulnerability."
+          }
+
+      - name: Build
+        shell: pwsh
+        run: >-
+          dotnet build FileOrganizer.slnx
+          --configuration Release
+          --no-restore
+          --disable-build-servers
+
+      - name: Test
+        shell: pwsh
+        run: >-
+          dotnet test FileOrganizer.slnx
+          --configuration Release
+          --no-build
+          --disable-build-servers
+          --logger "console;verbosity=minimal"
+
+      - name: Validate locked Windows publish graph
+        shell: pwsh
+        run: >-
+          dotnet restore src/FileOrganizer.App/FileOrganizer.App.csproj
+          --runtime win-x64
+          --locked-mode
+          --configfile scripts/NuGet.Release.Config
+          --disable-build-servers

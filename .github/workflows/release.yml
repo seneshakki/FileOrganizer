@@ -1,0 +1,231 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag, for example v0.1.0-beta.1
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and verify Windows portable release
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      DISPATCH_REF_TYPE: ${{ github.ref_type }}
+      DISPATCH_REF_NAME: ${{ github.ref_name }}
+
+    outputs:
+      commit: ${{ steps.version.outputs.commit }}
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Validate requested tag
+        shell: pwsh
+        run: |
+          if ($env:DISPATCH_REF_TYPE -ne "tag" -or
+              $env:DISPATCH_REF_NAME -cne $env:RELEASE_TAG) {
+            throw "Run this workflow from the same existing tag supplied as the input."
+          }
+          if ($env:RELEASE_TAG -notmatch '^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:(?:0|[1-9][0-9]*)|(?:[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))(?:\.(?:(?:0|[1-9][0-9]*)|(?:[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)))*)?$') {
+            throw "Release tag is not a supported semantic version: $env:RELEASE_TAG"
+          }
+
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install repository SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Verify tag, commit, and project version
+        id: version
+        shell: pwsh
+        run: |
+          $headCommit = (& git rev-parse --verify HEAD).Trim().ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0 -or $headCommit -notmatch '^[0-9a-f]{40}$') {
+            throw "Unable to resolve the checked-out commit."
+          }
+          $tagCommit = (& git rev-parse --verify "$($env:RELEASE_TAG)^{commit}").Trim().ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0 -or $tagCommit -ne $headCommit) {
+            throw "The requested tag does not resolve to the checked-out commit."
+          }
+          & git merge-base --is-ancestor $headCommit refs/remotes/origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "The release tag is not reachable from the remote main branch."
+          }
+
+          $versionOutput = @(
+            & dotnet msbuild `
+              src/FileOrganizer.App/FileOrganizer.App.csproj `
+              -nologo `
+              -getProperty:Version)
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to evaluate the project version."
+          }
+          $version = ($versionOutput | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Last 1).Trim()
+          if ("v$version" -ne $env:RELEASE_TAG) {
+            throw "Tag $env:RELEASE_TAG does not match project version $version."
+          }
+
+          "commit=$headCommit" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build and verify portable package
+        shell: pwsh
+        run: |
+          $packageDirectory = [IO.Path]::GetFullPath(
+            "artifacts/portable/FileOrganizer-${{ steps.version.outputs.version }}-win-x64-portable")
+          ./scripts/Publish-WindowsPortable.ps1 -OutputDirectory $packageDirectory
+
+      - name: Create and re-verify release assets
+        shell: pwsh
+        run: |
+          $packageDirectory = [IO.Path]::GetFullPath(
+            "artifacts/portable/FileOrganizer-${{ steps.version.outputs.version }}-win-x64-portable")
+          ./scripts/New-WindowsPortableReleaseAssets.ps1 `
+            -PackageDirectory $packageDirectory `
+            -Version '${{ steps.version.outputs.version }}' `
+            -ExpectedCommit '${{ steps.version.outputs.commit }}'
+
+      - name: Stage immutable release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets-${{ steps.version.outputs.commit }}
+          path: |
+            artifacts/release/FileOrganizer-${{ steps.version.outputs.version }}-win-x64-portable-assets/FileOrganizer-${{ steps.version.outputs.version }}-win-x64-portable.zip
+            artifacts/release/FileOrganizer-${{ steps.version.outputs.version }}-win-x64-portable-assets/FileOrganizer-${{ steps.version.outputs.version }}-win-x64-portable.zip.sha256
+            docs/releases/${{ steps.version.outputs.version }}.md
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish verified GitHub prerelease
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_VERSION: ${{ needs.build.outputs.version }}
+      RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
+
+    steps:
+      - name: Download verified release bundle
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: release-assets-${{ needs.build.outputs.commit }}
+          path: release-bundle
+
+      - name: Validate downloaded release bundle
+        shell: pwsh
+        run: |
+          if ("v$env:RELEASE_VERSION" -ne $env:RELEASE_TAG) {
+            throw "Release tag and verified version no longer match."
+          }
+          if ($env:RELEASE_COMMIT -notmatch '^[0-9a-f]{40}$') {
+            throw "The verified release commit is invalid."
+          }
+
+          $archiveName = "FileOrganizer-$env:RELEASE_VERSION-win-x64-portable.zip"
+          $assetBundle = "FileOrganizer-$env:RELEASE_VERSION-win-x64-portable-assets"
+          $expectedFiles = @(
+            "artifacts/release/$assetBundle/$archiveName",
+            "artifacts/release/$assetBundle/$archiveName.sha256",
+            "docs/releases/$env:RELEASE_VERSION.md")
+          $bundleRoot = [IO.Path]::GetFullPath("release-bundle")
+          $bundlePrefix = $bundleRoot.TrimEnd(
+            [IO.Path]::DirectorySeparatorChar,
+            [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+          $actualFiles = @(
+            Get-ChildItem -LiteralPath $bundleRoot -File -Recurse |
+              ForEach-Object {
+                $_.FullName.Substring($bundlePrefix.Length).Replace(
+                  [IO.Path]::DirectorySeparatorChar,
+                  [IO.Path]::AltDirectorySeparatorChar)
+              } |
+              Sort-Object)
+          $sortedExpectedFiles = @($expectedFiles | Sort-Object)
+          if (($actualFiles -join "`n") -cne ($sortedExpectedFiles -join "`n")) {
+            throw "The downloaded release bundle has an unexpected file inventory."
+          }
+
+          $archive = Join-Path $bundleRoot $expectedFiles[0]
+          $checksum = Join-Path $bundleRoot $expectedFiles[1]
+          $checksumText = [IO.File]::ReadAllText($checksum).Trim()
+          if ($checksumText -notmatch '^([0-9A-F]{64})  ([^\\/]+\.zip)$' -or
+              $Matches[2] -cne $archiveName) {
+            throw "The downloaded checksum file is malformed."
+          }
+          $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+          if ($actualHash -cne $Matches[1]) {
+            throw "The downloaded release archive checksum does not match."
+          }
+
+      - name: Publish GitHub prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:RELEASE_VERSION
+          $tagRefJson = @(& gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG")
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to re-resolve the remote release tag."
+          }
+          $tagRef = ConvertFrom-Json -InputObject ($tagRefJson -join [Environment]::NewLine)
+          $resolvedType = [string] $tagRef.object.type
+          $resolvedCommit = ([string] $tagRef.object.sha).ToLowerInvariant()
+          for ($tagDepth = 0; $resolvedType -eq "tag" -and $tagDepth -lt 8; $tagDepth++) {
+            $tagObjectJson = @(& gh api "repos/$env:GITHUB_REPOSITORY/git/tags/$resolvedCommit")
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to peel the remote release tag."
+            }
+            $tagObject = ConvertFrom-Json -InputObject (
+              $tagObjectJson -join [Environment]::NewLine)
+            $resolvedType = [string] $tagObject.object.type
+            $resolvedCommit = ([string] $tagObject.object.sha).ToLowerInvariant()
+          }
+          if ($resolvedType -ne "commit" -or
+              $resolvedCommit -cne $env:RELEASE_COMMIT) {
+            throw "The remote release tag no longer identifies the verified commit."
+          }
+
+          $bundleRoot = [IO.Path]::GetFullPath("release-bundle")
+          $notes = Join-Path $bundleRoot "docs/releases/$version.md"
+          $assetBundle = "FileOrganizer-$version-win-x64-portable-assets"
+          $archive = Join-Path $bundleRoot "artifacts/release/$assetBundle/FileOrganizer-$version-win-x64-portable.zip"
+          $checksum = "$archive.sha256"
+          $arguments = @(
+            "release", "create", $env:RELEASE_TAG,
+            $archive, $checksum,
+            "--repo", $env:GITHUB_REPOSITORY,
+            "--verify-tag",
+            "--title", "FileOrganizer $version",
+            "--notes-file", $notes)
+          if ($version.Contains("-")) {
+            $arguments += "--prerelease"
+          }
+          & gh @arguments
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub release publication failed with exit code $LASTEXITCODE."
+          }
