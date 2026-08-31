@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Runtime.ExceptionServices;
 using FileOrganizer.App.Services;
 using FileOrganizer.App.Startup;
@@ -7,26 +8,17 @@ using FileOrganizer.Application.Watching;
 
 namespace FileOrganizer.App.ViewModels;
 
-/// <summary>Read-only desktop projection of configuration and watched-root planning previews.</summary>
+/// <summary>Desktop shell for validated configuration editing and read-only planning previews.</summary>
 public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
 {
     private readonly object _gate = new();
-    private readonly ConfigurationPathArguments _arguments;
-    private readonly OrganizationConfigurationService _configurationService;
     private readonly IWatchPreviewRuntimeFactory _runtimeFactory;
     private readonly IUiDispatcher _dispatcher;
-    private readonly CancellationTokenSource _lifetime = new();
-    private readonly ReadOnlyCollection<string> _emptyProblems = Array.AsReadOnly(Array.Empty<string>());
-
-    private ReadOnlyCollection<string> _problems;
+    private readonly List<IWatchPreviewRuntime> _cleanupPending = [];
     private ReadOnlyCollection<WatchRootViewModel> _roots =
         Array.AsReadOnly(Array.Empty<WatchRootViewModel>());
-    private ConfigurationLoadState _loadState = ConfigurationLoadState.AwaitingPath;
-    private string _status = "A configuration path is required.";
     private IWatchPreviewRuntime? _runtime;
-    private Task? _initialization;
     private Task? _disposal;
-    private Exception? _initializationFailure;
     private long _lastAppliedRevision = -1;
     private bool _disposed;
 
@@ -34,67 +26,49 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         ConfigurationPathArguments arguments,
         OrganizationConfigurationService configurationService,
         IWatchPreviewRuntimeFactory runtimeFactory,
-        IUiDispatcher dispatcher)
+        IUiDispatcher dispatcher,
+        IConfigurationPathPicker pathPicker)
     {
         ArgumentNullException.ThrowIfNull(arguments);
         ArgumentNullException.ThrowIfNull(configurationService);
         ArgumentNullException.ThrowIfNull(runtimeFactory);
         ArgumentNullException.ThrowIfNull(dispatcher);
+        ArgumentNullException.ThrowIfNull(pathPicker);
 
-        _arguments = arguments;
-        _configurationService = configurationService;
         _runtimeFactory = runtimeFactory;
         _dispatcher = dispatcher;
-        _problems = _emptyProblems;
-        if (arguments.Problem is not null)
-        {
-            _problems = Array.AsReadOnly(new[] { arguments.Problem });
-        }
+        Editor = new ConfigurationEditorViewModel(
+            arguments,
+            configurationService,
+            pathPicker,
+            ActivateConfigurationAsync);
+        Editor.PropertyChanged += OnEditorPropertyChanged;
     }
 
     public string Title { get; } = "FileOrganizer";
 
-    public string Subtitle { get; } = "Read-only watched-folder planning dashboard";
+    public string Subtitle { get; } = "Validated configuration and read-only planning workspace";
 
-    public string ConfigurationPath => _arguments.ConfigurationPath ?? "No configuration selected";
+    public ConfigurationEditorViewModel Editor { get; }
 
-    public ConfigurationLoadState LoadState => _loadState;
+    public string ConfigurationPath => Editor.ConfigurationPath;
 
-    public string Status => _status;
+    public ConfigurationLoadState LoadState => Editor.LoadState;
 
-    public IReadOnlyList<string> Problems => _problems;
+    public string Status => Editor.Status;
 
-    public bool HasProblems => _problems.Count != 0;
+    public IReadOnlyList<string> Problems => Editor.Problems;
+
+    public bool HasProblems => Editor.HasProblems;
 
     public IReadOnlyList<WatchRootViewModel> Roots => _roots;
 
     public bool HasRoots => _roots.Count != 0;
 
-    public bool ShowEmptyConfiguration => LoadState == ConfigurationLoadState.Loaded && !HasRoots;
+    public bool ShowEmptyConfiguration =>
+        LoadState == ConfigurationLoadState.Loaded && !HasRoots;
 
-    public Task InitializeAsync()
-    {
-        TaskCompletionSource? start = null;
-        Task initialization;
-        lock (_gate)
-        {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            if (_initialization is null)
-            {
-                start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                _initialization = start.Task;
-            }
-
-            initialization = _initialization;
-        }
-
-        if (start is not null)
-        {
-            _ = CompleteInitializationAsync(start, _lifetime.Token);
-        }
-
-        return initialization;
-    }
+    public Task InitializeAsync() => Editor.InitializeAsync();
 
     public ValueTask DisposeAsync()
     {
@@ -108,100 +82,52 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         return new ValueTask(disposal);
     }
 
-    private async Task InitializeCoreAsync(CancellationToken cancellationToken)
-    {
-        if (!_arguments.IsValid)
-        {
-            SetLoadState(
-                ConfigurationLoadState.AwaitingPath,
-                "Startup arguments are incomplete; no filesystem monitoring was started.");
-            return;
-        }
-
-        SetLoadState(ConfigurationLoadState.Loading, "Loading and validating configuration…");
-        try
-        {
-            ConfigurationLoadResult load = await _configurationService.LoadAsync(
-                _arguments.ConfigurationPath!,
-                cancellationToken);
-            cancellationToken.ThrowIfCancellationRequested();
-
-            switch (load.Status)
-            {
-                case ConfigurationLoadStatus.NotFound:
-                    SetProblems(
-                        ConfigurationLoadState.Missing,
-                        "Configuration file was not found. Nothing was created.",
-                        ["The caller-supplied configuration path does not exist."]);
-                    return;
-                case ConfigurationLoadStatus.Invalid:
-                    SetProblems(
-                        ConfigurationLoadState.Invalid,
-                        "Configuration is invalid; no watcher was started.",
-                        load.ConfigurationProblems.Select(static problem =>
-                            $"{problem.Location} · {problem.Kind}: {problem.Description}"));
-                    return;
-                case ConfigurationLoadStatus.StorageFailure:
-                    SetProblems(
-                        ConfigurationLoadState.StorageFailure,
-                        "Configuration could not be read; no watcher was started.",
-                        load.StorageProblems.Select(static problem =>
-                            $"{problem.Kind}: {problem.Description}"));
-                    return;
-                case ConfigurationLoadStatus.Loaded:
-                    await StartRuntimeAsync(load.Configuration!, cancellationToken);
-                    return;
-                default:
-                    throw new InvalidOperationException("Configuration load returned an unknown status.");
-            }
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-        }
-        catch (Exception exception) when (cancellationToken.IsCancellationRequested)
-        {
-            lock (_gate)
-            {
-                _initializationFailure ??= exception;
-            }
-        }
-        catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
-        {
-            SetProblems(
-                ConfigurationLoadState.RuntimeFailure,
-                "The read-only watch runtime could not be started.",
-                [exception.Message]);
-        }
-    }
-
-    private async Task CompleteInitializationAsync(
-        TaskCompletionSource completion,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            await Task.Yield();
-            await InitializeCoreAsync(cancellationToken);
-            completion.TrySetResult();
-        }
-        catch (Exception exception)
-        {
-            completion.TrySetException(exception);
-        }
-    }
-
-    private async Task StartRuntimeAsync(
+    private async Task ActivateConfigurationAsync(
         OrganizationConfiguration configuration,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        IWatchPreviewRuntime runtime = _runtimeFactory.Create(configuration);
+        IWatchPreviewRuntime? previous;
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            previous = _runtime;
+            _runtime = null;
+            _lastAppliedRevision = -1;
+        }
+
+        if (previous is not null)
+        {
+            previous.SnapshotChanged -= OnSnapshotChanged;
+        }
+
+        ClearRoots();
+        if (previous is not null)
+        {
+            try
+            {
+                await previous.DisposeAsync();
+            }
+            catch
+            {
+                TrackCleanupFailure(previous);
+                throw;
+            }
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        IWatchPreviewRuntime runtime = _runtimeFactory.Create(configuration)
+            ?? throw new InvalidOperationException("The preview runtime factory returned null.");
         runtime.SnapshotChanged += OnSnapshotChanged;
         bool disposeImmediately;
         lock (_gate)
         {
             disposeImmediately = _disposed;
-            if (!disposeImmediately)
+            if (disposeImmediately)
+            {
+                runtime.SnapshotChanged -= OnSnapshotChanged;
+            }
+            else
             {
                 _runtime = runtime;
             }
@@ -209,24 +135,18 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
 
         if (disposeImmediately)
         {
-            runtime.SnapshotChanged -= OnSnapshotChanged;
             await runtime.DisposeAsync();
-            return;
         }
+
+        ObjectDisposedException.ThrowIf(disposeImmediately, this);
 
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
             runtime.Start();
-            ApplySnapshot(runtime.Snapshot);
-            SetLoadState(
-                ConfigurationLoadState.Loaded,
-                configuration.WatchRoots.Count == 0
-                    ? "Configuration loaded. No watch roots are configured."
-                    : $"Configuration loaded. Monitoring {configuration.WatchRoots.Count} configured root(s).",
-                clearProblems: true);
+            ApplySnapshot(runtime, runtime.Snapshot);
         }
-        catch
+        catch (Exception startFailure)
         {
             runtime.SnapshotChanged -= OnSnapshotChanged;
             lock (_gate)
@@ -237,30 +157,47 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
                 }
             }
 
-            await runtime.DisposeAsync();
-            throw;
+            try
+            {
+                await runtime.DisposeAsync();
+            }
+            catch (Exception cleanupFailure)
+            {
+                TrackCleanupFailure(runtime);
+                throw new AggregateException(startFailure, cleanupFailure);
+            }
+
+            ExceptionDispatchInfo.Capture(startFailure).Throw();
         }
     }
 
     private void OnSnapshotChanged(object? sender, WatchPreviewRuntimeNotification notification)
     {
-        _dispatcher.Post(
-            () =>
-            {
-                lock (_gate)
-                {
-                    if (_disposed || !ReferenceEquals(sender, _runtime))
-                    {
-                        return;
-                    }
-                }
+        if (sender is not IWatchPreviewRuntime runtime)
+        {
+            return;
+        }
 
-                ApplySnapshot(notification.Snapshot);
-            });
+        _dispatcher.Post(
+            () => ApplySnapshot(runtime, notification.Snapshot));
     }
 
-    private void ApplySnapshot(WatchPreviewRuntimeSnapshot snapshot)
+    private void TrackCleanupFailure(IWatchPreviewRuntime runtime)
     {
+        lock (_gate)
+        {
+            if (!_cleanupPending.Contains(runtime, ReferenceEqualityComparer.Instance))
+            {
+                _cleanupPending.Add(runtime);
+            }
+        }
+    }
+
+    private void ApplySnapshot(
+        IWatchPreviewRuntime runtime,
+        WatchPreviewRuntimeSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(runtime);
         ArgumentNullException.ThrowIfNull(snapshot);
         ReadOnlyCollection<WatchRootViewModel> roots = Array.AsReadOnly(
             snapshot.Roots.Select(
@@ -272,7 +209,9 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
                 .ToArray());
         lock (_gate)
         {
-            if (_disposed || snapshot.Revision <= _lastAppliedRevision)
+            if (_disposed
+                || !ReferenceEquals(runtime, _runtime)
+                || snapshot.Revision <= _lastAppliedRevision)
             {
                 return;
             }
@@ -281,6 +220,26 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
             _roots = roots;
         }
 
+        RaiseRootsChanged();
+    }
+
+    private void ClearRoots()
+    {
+        bool changed;
+        lock (_gate)
+        {
+            changed = _roots.Count != 0;
+            _roots = Array.AsReadOnly(Array.Empty<WatchRootViewModel>());
+        }
+
+        if (changed)
+        {
+            RaiseRootsChanged();
+        }
+    }
+
+    private void RaiseRootsChanged()
+    {
         RaisePropertyChanged(nameof(Roots));
         RaisePropertyChanged(nameof(HasRoots));
         RaisePropertyChanged(nameof(ShowEmptyConfiguration));
@@ -311,42 +270,31 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         return runtime is not null && command(runtime, watchRootId);
     }
 
-    private void SetLoadState(
-        ConfigurationLoadState state,
-        string status,
-        bool clearProblems = false)
+    private void OnEditorPropertyChanged(object? sender, PropertyChangedEventArgs eventArgs)
     {
-        _loadState = state;
-        _status = status;
-        if (clearProblems)
+        switch (eventArgs.PropertyName)
         {
-            _problems = _emptyProblems;
-            RaisePropertyChanged(nameof(Problems));
-            RaisePropertyChanged(nameof(HasProblems));
+            case nameof(ConfigurationEditorViewModel.ConfigurationPath):
+                RaisePropertyChanged(nameof(ConfigurationPath));
+                break;
+            case nameof(ConfigurationEditorViewModel.LoadState):
+                RaisePropertyChanged(nameof(LoadState));
+                RaisePropertyChanged(nameof(ShowEmptyConfiguration));
+                break;
+            case nameof(ConfigurationEditorViewModel.Status):
+                RaisePropertyChanged(nameof(Status));
+                break;
+            case nameof(ConfigurationEditorViewModel.Problems):
+                RaisePropertyChanged(nameof(Problems));
+                break;
+            case nameof(ConfigurationEditorViewModel.HasProblems):
+                RaisePropertyChanged(nameof(HasProblems));
+                break;
         }
-
-        RaisePropertyChanged(nameof(LoadState));
-        RaisePropertyChanged(nameof(Status));
-        RaisePropertyChanged(nameof(ShowEmptyConfiguration));
-    }
-
-    private void SetProblems(
-        ConfigurationLoadState state,
-        string status,
-        IEnumerable<string> problems)
-    {
-        ArgumentNullException.ThrowIfNull(problems);
-        string[] snapshot = [.. problems];
-        _problems = Array.AsReadOnly(snapshot.Length == 0 ? ["An unspecified problem occurred."] : snapshot);
-        SetLoadState(state, status);
-        RaisePropertyChanged(nameof(Problems));
-        RaisePropertyChanged(nameof(HasProblems));
     }
 
     private async Task DisposeCoreAsync()
     {
-        Task? initialization;
-        Exception? failure = null;
         lock (_gate)
         {
             if (_disposed)
@@ -355,68 +303,53 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
             }
 
             _disposed = true;
-            _lifetime.Cancel();
-            initialization = _initialization;
         }
 
-        if (initialization is not null)
-        {
-            try
-            {
-                await initialization.ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-            }
-            catch (Exception exception)
-            {
-                failure = exception;
-            }
-        }
-
-        IWatchPreviewRuntime? runtime;
-        lock (_gate)
-        {
-            failure = CombineFailures(failure, _initializationFailure);
-            runtime = _runtime;
-            _runtime = null;
-        }
-
+        Exception? failure = null;
         try
         {
-            if (runtime is not null)
-            {
-                runtime.SnapshotChanged -= OnSnapshotChanged;
-                await runtime.DisposeAsync().ConfigureAwait(false);
-            }
+            await Editor.DisposeAsync().ConfigureAwait(false);
         }
         catch (Exception exception)
         {
-            failure = CombineFailures(failure, exception);
+            failure = exception;
         }
         finally
         {
-            _lifetime.Dispose();
+            Editor.PropertyChanged -= OnEditorPropertyChanged;
+        }
+
+        IWatchPreviewRuntime? runtime;
+        IWatchPreviewRuntime[] cleanupPending;
+        lock (_gate)
+        {
+            runtime = _runtime;
+            _runtime = null;
+            cleanupPending = [.. _cleanupPending];
+            _cleanupPending.Clear();
+        }
+
+        IWatchPreviewRuntime[] runtimes = runtime is null
+            ? cleanupPending
+            : [runtime, .. cleanupPending.Where(candidate => !ReferenceEquals(candidate, runtime))];
+        foreach (IWatchPreviewRuntime candidate in runtimes)
+        {
+            candidate.SnapshotChanged -= OnSnapshotChanged;
+            try
+            {
+                await candidate.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                failure = failure is null
+                    ? exception
+                    : new AggregateException(failure, exception);
+            }
         }
 
         if (failure is not null)
         {
             ExceptionDispatchInfo.Capture(failure).Throw();
         }
-    }
-
-    private static Exception? CombineFailures(Exception? first, Exception? second)
-    {
-        if (first is null)
-        {
-            return second;
-        }
-
-        if (second is null || ReferenceEquals(first, second))
-        {
-            return first;
-        }
-
-        return new AggregateException(first, second);
     }
 }

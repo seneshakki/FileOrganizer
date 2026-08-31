@@ -13,7 +13,9 @@ public sealed class ConfigurationPathArguments
 
     public string? Problem { get; }
 
-    public bool IsValid => ConfigurationPath is not null && Problem is null;
+    public bool IsValid => Problem is null;
+
+    public bool HasConfigurationPath => ConfigurationPath is not null;
 
     public static ConfigurationPathArguments Parse(IEnumerable<string> arguments)
     {
@@ -21,7 +23,7 @@ public sealed class ConfigurationPathArguments
         string[] values = [.. arguments];
         if (values.Length == 0)
         {
-            return Invalid("Start FileOrganizer with --config followed by an absolute JSON file path.");
+            return new ConfigurationPathArguments(null, null);
         }
 
         if (values.Length != 2 || !string.Equals(values[0], "--config", StringComparison.Ordinal))

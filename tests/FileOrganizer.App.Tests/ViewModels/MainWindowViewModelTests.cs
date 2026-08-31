@@ -27,7 +27,8 @@ public sealed class MainWindowViewModelTests
             ConfigurationPathArguments.Parse([]),
             new OrganizationConfigurationService(store),
             factory,
-            new QueuedDispatcher());
+            new QueuedDispatcher(),
+            new NullPathPicker());
 
         await viewModel.InitializeAsync();
 
@@ -186,6 +187,43 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task SavedConfigurationDisposesOldRuntimeAcceptsNewRevisionZeroAndIgnoresQueuedOldEvents()
+    {
+        ScriptedTextStore store = new(ConfigurationTextReadResult.Found(ConfigurationJson()))
+        {
+            AllowWrites = true,
+        };
+        QueuedDispatcher dispatcher = new();
+        RecordingRuntimeFactory factory = new();
+        MainWindowViewModel viewModel = CreateViewModel(store, factory, dispatcher);
+        await viewModel.InitializeAsync();
+        FakeRuntime oldRuntime = Assert.IsType<FakeRuntime>(factory.Runtime);
+        oldRuntime.Publish(
+            SnapshotWithFirstState(factory.Configuration!, WatchRootState.Synchronized, 5),
+            [FirstRootId]);
+        dispatcher.RunAll();
+        Assert.Equal(WatchRootState.Synchronized.ToString(), viewModel.Roots[0].State);
+
+        oldRuntime.Publish(
+            SnapshotWithFirstState(factory.Configuration!, WatchRootState.RescanRequired, 6),
+            [FirstRootId]);
+        viewModel.Editor.ConfigurationText = SingleRootConfigurationJson();
+        await viewModel.Editor.SaveAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(oldRuntime.Disposed);
+        Assert.Equal(2, factory.CreateCount);
+        Assert.Equal(SecondRootId, Assert.Single(viewModel.Roots).Id);
+        Assert.Equal(WatchRootState.RequiresInitialScan.ToString(), viewModel.Roots[0].State);
+
+        dispatcher.RunAll();
+
+        Assert.Equal(SecondRootId, Assert.Single(viewModel.Roots).Id);
+        Assert.Equal(WatchRootState.RequiresInitialScan.ToString(), viewModel.Roots[0].State);
+        Assert.Equal(1, store.WriteCount);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
     public async Task ShutdownObservesNonCancellationInitializationCleanupFailureWithoutFaultingInitializer()
     {
         CancellationToken testCancellation = TestContext.Current.CancellationToken;
@@ -245,7 +283,8 @@ public sealed class MainWindowViewModelTests
             ConfigurationPathArguments.Parse(["--config", path]),
             new OrganizationConfigurationService(store),
             factory,
-            dispatcher);
+            dispatcher,
+            new NullPathPicker());
     }
 
     private static WatchPreviewRuntimeSnapshot SnapshotWithHistoricalPreview(
@@ -356,12 +395,34 @@ public sealed class MainWindowViewModelTests
         }
         """;
 
+    private static string SingleRootConfigurationJson() => $$"""
+        {
+          "schemaVersion": 1,
+          "pathPolicy": {
+            "syntax": "windows",
+            "caseSensitivity": "insensitive",
+            "unicodeNormalization": "formC"
+          },
+          "watchRoots": [
+            {
+              "id": "{{SecondRootId:D}}",
+              "rootPath": "D:\\WatchB",
+              "enabled": true,
+              "includeSubdirectories": false
+            }
+          ],
+          "rules": []
+        }
+        """;
+
     private sealed class ScriptedTextStore(ConfigurationTextReadResult readResult)
         : IConfigurationTextStore
     {
         public int ReadCount { get; private set; }
 
         public int WriteCount { get; private set; }
+
+        public bool AllowWrites { get; init; }
 
         public ValueTask<ConfigurationTextReadResult> ReadAsync(
             string path,
@@ -377,8 +438,15 @@ public sealed class MainWindowViewModelTests
             string content,
             CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             WriteCount++;
-            throw new InvalidOperationException("The read-only dashboard must never write configuration.");
+            if (!AllowWrites)
+            {
+                throw new InvalidOperationException(
+                    "This test did not authorize a configuration write.");
+            }
+
+            return ValueTask.FromResult(ConfigurationTextWriteResult.Succeeded());
         }
     }
 
@@ -390,6 +458,8 @@ public sealed class MainWindowViewModelTests
 
         public IWatchPreviewRuntime? Runtime { get; private set; }
 
+        public List<FakeRuntime> Runtimes { get; } = [];
+
         public Action<OrganizationConfiguration, FakeRuntime>? RuntimeSetup { get; init; }
 
         public IWatchPreviewRuntime Create(OrganizationConfiguration configuration)
@@ -398,6 +468,7 @@ public sealed class MainWindowViewModelTests
             Configuration = configuration;
             var runtime = new FakeRuntime(InitialSnapshot(configuration));
             RuntimeSetup?.Invoke(configuration, runtime);
+            Runtimes.Add(runtime);
             Runtime = runtime;
             return Runtime;
         }
@@ -539,6 +610,24 @@ public sealed class MainWindowViewModelTests
             {
                 action();
             }
+        }
+    }
+
+    private sealed class NullPathPicker : IConfigurationPathPicker
+    {
+        public ValueTask<string?> OpenExistingAsync(
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult<string?>(null);
+        }
+
+        public ValueTask<string?> ChooseSaveDestinationAsync(
+            string suggestedFileName,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult<string?>(null);
         }
     }
 }

@@ -20,15 +20,15 @@ public partial class App : Avalonia.Application
         {
             var configurationService = new OrganizationConfigurationService(
                 new FileConfigurationTextStore());
+            var mainWindow = new MainWindow();
             var viewModel = new MainWindowViewModel(
                 ConfigurationPathArguments.Parse(desktop.Args ?? []),
                 configurationService,
                 new WindowsWatchPreviewRuntimeFactory(),
-                new AvaloniaUiDispatcher());
-            desktop.MainWindow = new MainWindow
-            {
-                DataContext = viewModel,
-            };
+                new AvaloniaUiDispatcher(),
+                new AvaloniaConfigurationPathPicker(mainWindow));
+            mainWindow.DataContext = viewModel;
+            desktop.MainWindow = mainWindow;
         }
 
         base.OnFrameworkInitializationCompleted();

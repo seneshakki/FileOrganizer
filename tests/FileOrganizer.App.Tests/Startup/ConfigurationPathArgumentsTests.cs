@@ -16,8 +16,18 @@ public sealed class ConfigurationPathArgumentsTests
         Assert.Null(result.Problem);
     }
 
+    [Fact]
+    public void NoArgumentsIsAValidFirstRunWithoutASelectedPath()
+    {
+        ConfigurationPathArguments result = ConfigurationPathArguments.Parse([]);
+
+        Assert.True(result.IsValid);
+        Assert.False(result.HasConfigurationPath);
+        Assert.Null(result.ConfigurationPath);
+        Assert.Null(result.Problem);
+    }
+
     [Theory]
-    [InlineData()]
     [InlineData("--config")]
     [InlineData("config.json")]
     [InlineData("--unknown", "C:\\config.json")]
@@ -28,6 +38,7 @@ public sealed class ConfigurationPathArgumentsTests
         ConfigurationPathArguments result = ConfigurationPathArguments.Parse(arguments);
 
         Assert.False(result.IsValid);
+        Assert.False(result.HasConfigurationPath);
         Assert.Null(result.ConfigurationPath);
         Assert.NotEmpty(result.Problem!);
     }
