@@ -10,6 +10,19 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
+  <!-- The local portable release is deliberately directory-based. Avalonia's
+       XAML/native probing has not been accepted for trimming or single-file extraction. -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release' and '$(RuntimeIdentifier)' == 'win-x64'">
+    <SelfContained>true</SelfContained>
+    <UseAppHost>true</UseAppHost>
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <DebugType>None</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <ErrorOnDuplicatePublishOutputFiles>true</ErrorOnDuplicatePublishOutputFiles>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="Avalonia" />
     <PackageReference Include="Avalonia.Desktop" />
@@ -24,10 +37,30 @@
     </PackageReference>
   </ItemGroup>
 
+  <!-- NuGet restore is not configuration-specific in every workflow. Ensure a
+       Release runtime cannot inherit the diagnostics host switch from a prior
+       Debug restore even though diagnostics assemblies are already excluded. -->
+  <ItemGroup Condition="'$(Configuration)' != 'Debug'">
+    <RuntimeHostConfigurationOption Remove="Avalonia.Diagnostics.Diagnostic.IsEnabled" />
+    <RuntimeHostConfigurationOption Include="Avalonia.Diagnostics.Diagnostic.IsEnabled"
+                                    Value="False" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\FileOrganizer.Application\FileOrganizer.Application.csproj" />
     <ProjectReference Include="..\FileOrganizer.Core\FileOrganizer.Core.csproj" />
     <ProjectReference Include="..\FileOrganizer.Infrastructure\FileOrganizer.Infrastructure.csproj" />
   </ItemGroup>
+
+  <!-- Some native Avalonia dependencies classify large PDBs as native runtime
+       assets. They are not needed in the portable end-user package. -->
+  <Target Name="RemoveNativeSymbolsFromPortablePublish"
+          AfterTargets="ComputeFilesToPublish"
+          Condition="'$(Configuration)' == 'Release' and '$(RuntimeIdentifier)' == 'win-x64'">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+                             Condition="'%(Extension)' == '.pdb'" />
+    </ItemGroup>
+  </Target>
 
 </Project>
