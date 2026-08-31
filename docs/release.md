@@ -52,8 +52,9 @@ The publish script archives the exact committed source into a unique workspace
 beneath the system temporary directory. From that workspace, with the committed
 `global.json`, repository build properties, release-only NuGet source file, and
 an empty isolated package cache, it performs the full Release build/test gate, a
-`win-x64` restore, a self-contained publish, and package verification. The second
-command is an explicit, repeatable re-verification step.
+`win-x64` restore, a self-contained publish, and package verification. Persistent
+build servers are disabled so isolated package files are not retained by reused
+MSBuild nodes. The second command is an explicit, repeatable re-verification step.
 
 For another local candidate, select a new absolute direct child of
 `artifacts\portable`:
