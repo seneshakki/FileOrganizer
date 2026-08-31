@@ -31,8 +31,48 @@ public sealed class OrganizationConfigurationServiceTests
         Assert.Equal(ConfigurationLoadStatus.Loaded, load.Status);
         Assert.Equal(ConfigurationSaveStatus.Saved, export.Status);
         Assert.NotNull(load.Configuration);
+        Assert.Equal(store.Files["active.json"], load.SourceText);
         Assert.Equal(2, store.WriteCount);
         Assert.True(store.Files.ContainsKey("export.json"));
+    }
+
+    [Fact]
+    public async Task ValidLoadPreservesTheExactSourceText()
+    {
+        ConfigurationEncodeResult encoded = OrganizationConfigurationJsonCodec.Encode(Configuration());
+        string sourceText = " \r\n" + encoded.Json + "\r\n";
+        ScriptedTextStore store = new();
+        store.Files["active.json"] = sourceText;
+        OrganizationConfigurationService service = new(store);
+
+        ConfigurationLoadResult load = await service.LoadAsync(
+            "active.json",
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ConfigurationLoadStatus.Loaded, load.Status);
+        Assert.NotNull(load.Configuration);
+        Assert.Equal(sourceText, load.SourceText);
+        Assert.Empty(load.ConfigurationProblems);
+    }
+
+    [Fact]
+    public async Task InvalidLoadPreservesTheExactMalformedSourceText()
+    {
+        const string malformed = " \r\n{ broken\r\n";
+        ScriptedTextStore store = new();
+        store.Files["active.json"] = malformed;
+        OrganizationConfigurationService service = new(store);
+
+        ConfigurationLoadResult load = await service.LoadAsync(
+            "active.json",
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ConfigurationLoadStatus.Invalid, load.Status);
+        Assert.Null(load.Configuration);
+        Assert.Equal(malformed, load.SourceText);
+        Assert.Contains(
+            load.ConfigurationProblems,
+            static problem => problem.Kind == ConfigurationProblemKind.MalformedJson);
     }
 
     [Fact]

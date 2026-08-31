@@ -96,7 +96,7 @@ public sealed class OrganizationConfigurationService
     {
         ConfigurationDecodeResult decoded = OrganizationConfigurationJsonCodec.Decode(content);
         return decoded.Succeeded
-            ? ConfigurationLoadResult.Loaded(decoded.Configuration!)
-            : ConfigurationLoadResult.Invalid(decoded.Problems);
+            ? ConfigurationLoadResult.Loaded(decoded.Configuration!, content)
+            : ConfigurationLoadResult.Invalid(decoded.Problems, content);
     }
 }
