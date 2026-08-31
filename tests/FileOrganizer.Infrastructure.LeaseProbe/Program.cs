@@ -6,10 +6,16 @@ namespace FileOrganizer.Infrastructure.LeaseProbe;
 internal static class Program
 {
     private const string HoldCommand = "hold";
+    private const string HoldNamedMutexCommand = "hold-named-mutex";
     private const string TryCommand = "try";
 
     public static async Task<int> Main(string[] args)
     {
+        if (args.Length == 2 && args[0] == HoldNamedMutexCommand)
+        {
+            return HoldNamedMutex(args[1]);
+        }
+
         if (args.Length != 1 || args[0] is not (HoldCommand or TryCommand))
         {
             await WriteLineAsync("ERROR|InvalidCommand");
@@ -55,6 +61,44 @@ internal static class Program
         }
 
         await WriteLineAsync("RELEASED");
+        return 0;
+    }
+
+    private static int HoldNamedMutex(string mutexName)
+    {
+        if (string.IsNullOrWhiteSpace(mutexName))
+        {
+            Console.Out.WriteLine("ERROR|InvalidMutexName");
+            Console.Out.Flush();
+            return 64;
+        }
+
+        using var mutex = new Mutex(initiallyOwned: false, mutexName);
+        try
+        {
+            mutex.WaitOne();
+        }
+        catch (AbandonedMutexException)
+        {
+        }
+
+        try
+        {
+            Console.Out.WriteLine("READY|NamedMutex");
+            Console.Out.Flush();
+            string? command = Console.In.ReadLine();
+            if (!string.Equals(command, "release", StringComparison.Ordinal))
+            {
+                return 3;
+            }
+        }
+        finally
+        {
+            mutex.ReleaseMutex();
+        }
+
+        Console.Out.WriteLine("RELEASED");
+        Console.Out.Flush();
         return 0;
     }
 

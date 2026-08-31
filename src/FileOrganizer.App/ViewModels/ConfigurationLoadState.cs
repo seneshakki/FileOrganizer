@@ -13,4 +13,5 @@ public enum ConfigurationLoadState
     Saving = 8,
     Importing = 9,
     Exporting = 10,
+    Conflict = 11,
 }

@@ -276,6 +276,179 @@ public sealed class WatchPreviewRuntimeTests
     }
 
     [Fact]
+    public async Task ReconnectFaultedRootUsesFreshSourceAndRequiresBaselineBeforeTrust()
+    {
+        await using Harness harness = new([Root(FirstRootId, @"C:\Watch-A")]);
+        harness.Runtime.Start();
+        await harness.Runtime.DrainAsync(TestContext.Current.CancellationToken);
+        ScriptedSource original = harness.SourceFactory.CurrentSource(FirstRootId);
+
+        original.Raise(
+            new FileChangeSourceEvent(
+                FileChangeSourceEventKind.WatcherError,
+                sequence: 1,
+                problem: new FileChangeSourceProblem(
+                    FileChangeSourceProblemKind.InputOutputFailure,
+                    "scripted source failure")));
+        await harness.Runtime.DrainAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(
+            WatchRootState.Faulted,
+            RootSnapshot(harness.Runtime.Snapshot, FirstRootId).State);
+        Assert.Equal(1, original.DisposeCount);
+
+        TaskCompletionSource scanEntered = NewSignal();
+        TaskCompletionSource releaseScan = NewSignal();
+        harness.Scanner.Handler = (root, _, cancellationToken) =>
+        {
+            scanEntered.TrySetResult();
+            releaseScan.Task.Wait(cancellationToken);
+            return CompleteScan(root);
+        };
+
+        Assert.True(harness.Runtime.ReconnectRoot(FirstRootId));
+        try
+        {
+            await scanEntered.Task.WaitAsync(TestContext.Current.CancellationToken);
+            WatchPreviewRootSnapshot awaitingBaseline =
+                RootSnapshot(harness.Runtime.Snapshot, FirstRootId);
+
+            Assert.Equal(WatchRootState.RescanRequired, awaitingBaseline.State);
+            Assert.Equal(2, harness.SourceFactory.Requests.Length);
+            Assert.Equal(2, harness.Scanner.CallCount(FirstRootId));
+            Assert.NotSame(original, harness.SourceFactory.CurrentSource(FirstRootId));
+        }
+        finally
+        {
+            releaseScan.TrySetResult();
+        }
+
+        await harness.Runtime.DrainAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(
+            WatchRootState.Synchronized,
+            RootSnapshot(harness.Runtime.Snapshot, FirstRootId).State);
+    }
+
+    [Fact]
+    public async Task ReconnectOpenFailureRemainsUnavailableWithoutStartingBaseline()
+    {
+        await using Harness harness = new([Root(FirstRootId, @"C:\Watch-A")]);
+        harness.Runtime.Start();
+        await harness.Runtime.DrainAsync(TestContext.Current.CancellationToken);
+        ScriptedSource original = harness.SourceFactory.CurrentSource(FirstRootId);
+
+        original.Raise(
+            new FileChangeSourceEvent(
+                FileChangeSourceEventKind.WatcherError,
+                sequence: 1,
+                problem: new FileChangeSourceProblem(
+                    FileChangeSourceProblemKind.Unavailable,
+                    "scripted unavailable source")));
+        await harness.Runtime.DrainAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(
+            WatchRootState.Unavailable,
+            RootSnapshot(harness.Runtime.Snapshot, FirstRootId).State);
+
+        harness.SourceFactory.OpenHandler = static _ =>
+            FileChangeSourceOpenResult.Unavailable(
+                new FileChangeSourceProblem(
+                    FileChangeSourceProblemKind.Inaccessible,
+                    "scripted reopen denied"));
+
+        Assert.True(harness.Runtime.ReconnectRoot(FirstRootId));
+        await harness.Runtime.DrainAsync(TestContext.Current.CancellationToken);
+        WatchPreviewRootSnapshot reopened =
+            RootSnapshot(harness.Runtime.Snapshot, FirstRootId);
+
+        Assert.Equal(WatchRootState.Unavailable, reopened.State);
+        Assert.Equal("scripted reopen denied", reopened.LatestDiagnostic!.Description);
+        Assert.Equal(2, harness.SourceFactory.Requests.Length);
+        Assert.Equal(1, harness.Scanner.CallCount(FirstRootId));
+        Assert.False(harness.Runtime.RequestBaselineScan(FirstRootId));
+    }
+
+    [Fact]
+    public async Task ReconnectRejectsNonFailureStatesWithoutReopeningSource()
+    {
+        await using Harness harness = new(
+        [
+            Root(FirstRootId, @"C:\Watch-A"),
+            Root(SecondRootId, @"C:\Watch-B", isEnabled: false),
+        ]);
+        TaskCompletionSource initialScanEntered = NewSignal();
+        TaskCompletionSource releaseInitialScan = NewSignal();
+        TaskCompletionSource resumedScanEntered = NewSignal();
+        TaskCompletionSource releaseResumedScan = NewSignal();
+        int attempts = 0;
+        harness.Scanner.Handler = (root, _, cancellationToken) =>
+        {
+            if (Interlocked.Increment(ref attempts) == 1)
+            {
+                initialScanEntered.TrySetResult();
+                releaseInitialScan.Task.Wait(cancellationToken);
+            }
+            else
+            {
+                resumedScanEntered.TrySetResult();
+                releaseResumedScan.Task.Wait(cancellationToken);
+            }
+
+            return CompleteScan(root);
+        };
+
+        Assert.False(harness.Runtime.ReconnectRoot(FirstRootId));
+        Assert.False(harness.Runtime.ReconnectRoot(SecondRootId));
+        Assert.False(harness.Runtime.ReconnectRoot(Guid.NewGuid()));
+        Assert.Empty(harness.SourceFactory.Requests);
+
+        harness.Runtime.Start();
+        await initialScanEntered.Task.WaitAsync(TestContext.Current.CancellationToken);
+        try
+        {
+            Assert.Equal(
+                WatchRootState.RequiresInitialScan,
+                RootSnapshot(harness.Runtime.Snapshot, FirstRootId).State);
+            Assert.False(harness.Runtime.ReconnectRoot(FirstRootId));
+            Assert.Single(harness.SourceFactory.Requests);
+        }
+        finally
+        {
+            releaseInitialScan.TrySetResult();
+        }
+
+        await harness.Runtime.DrainAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(
+            WatchRootState.Synchronized,
+            RootSnapshot(harness.Runtime.Snapshot, FirstRootId).State);
+        Assert.False(harness.Runtime.ReconnectRoot(FirstRootId));
+        Assert.Single(harness.SourceFactory.Requests);
+
+        Assert.True(harness.Runtime.PauseRoot(FirstRootId));
+        Assert.Equal(
+            WatchRootState.Paused,
+            RootSnapshot(harness.Runtime.Snapshot, FirstRootId).State);
+        Assert.False(harness.Runtime.ReconnectRoot(FirstRootId));
+        Assert.Single(harness.SourceFactory.Requests);
+
+        Assert.True(harness.Runtime.ResumeRoot(FirstRootId));
+        await resumedScanEntered.Task.WaitAsync(TestContext.Current.CancellationToken);
+        try
+        {
+            Assert.Equal(
+                WatchRootState.RescanRequired,
+                RootSnapshot(harness.Runtime.Snapshot, FirstRootId).State);
+            Assert.False(harness.Runtime.ReconnectRoot(FirstRootId));
+            Assert.Equal(2, harness.SourceFactory.Requests.Length);
+        }
+        finally
+        {
+            releaseResumedScan.TrySetResult();
+        }
+
+        await harness.Runtime.DrainAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
     public async Task BlockedSubscriberDoesNotBlockWatcherCallbackAndPendingNotificationUnionsChangedRoots()
     {
         await using Harness harness = new(
@@ -376,6 +549,7 @@ public sealed class WatchPreviewRuntimeTests
         Assert.Equal(disposedSnapshot.Revision, harness.Runtime.Snapshot.Revision);
         Assert.Equal(notificationCount, Volatile.Read(ref notifications));
         Assert.False(harness.Runtime.PauseRoot(FirstRootId));
+        Assert.False(harness.Runtime.ReconnectRoot(FirstRootId));
         Assert.Equal(1, source.DisposeCount);
     }
 
@@ -575,7 +749,9 @@ public sealed class WatchPreviewRuntimeTests
         private readonly List<FileChangeSourceRequest> _requests = [];
         private readonly Dictionary<Guid, ScriptedSource> _currentSources = [];
 
-        public IReadOnlyList<FileChangeSourceRequest> Requests
+        public Func<FileChangeSourceRequest, FileChangeSourceOpenResult>? OpenHandler { get; set; }
+
+        public FileChangeSourceRequest[] Requests
         {
             get
             {
@@ -588,14 +764,18 @@ public sealed class WatchPreviewRuntimeTests
 
         public FileChangeSourceOpenResult Open(FileChangeSourceRequest request)
         {
-            ScriptedSource source = new();
+            FileChangeSourceOpenResult result = OpenHandler?.Invoke(request)
+                ?? FileChangeSourceOpenResult.Opened(new ScriptedSource());
             lock (_gate)
             {
                 _requests.Add(request);
-                _currentSources[request.WatchRootId] = source;
+                if (result.Source is ScriptedSource source)
+                {
+                    _currentSources[request.WatchRootId] = source;
+                }
             }
 
-            return FileChangeSourceOpenResult.Opened(source);
+            return result;
         }
 
         public ScriptedSource CurrentSource(Guid rootId)

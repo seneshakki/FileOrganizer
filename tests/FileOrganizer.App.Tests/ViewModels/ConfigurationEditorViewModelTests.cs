@@ -1,3 +1,4 @@
+using System.Text;
 using FileOrganizer.App.Services;
 using FileOrganizer.App.Startup;
 using FileOrganizer.App.ViewModels;
@@ -136,6 +137,85 @@ public sealed class ConfigurationEditorViewModelTests
     }
 
     [Fact]
+    public async Task MissingStartupPathIsNeverReplacedIfAnotherProcessCreatesIt()
+    {
+        ScriptedTextStore store = new();
+        RecordingActivation activation = new();
+        ConfigurationEditorViewModel editor = CreateEditor(
+            Arguments(ActivePath),
+            store,
+            new QueuePathPicker(),
+            activation);
+        await editor.InitializeAsync();
+        store.Files[ActivePath] = "external";
+
+        await editor.CreateAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(ConfigurationLoadState.Conflict, editor.LoadState);
+        Assert.Equal("external", store.Files[ActivePath]);
+        Assert.Empty(activation.Configurations);
+        Assert.Equal(
+            ConfigurationWritePreconditionKind.MustBeMissing,
+            store.LastWriteRequest!.Precondition.Kind);
+        Assert.Contains(editor.Problems, static problem =>
+            problem.Contains("TargetAlreadyExists", StringComparison.Ordinal));
+        await editor.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ValidDraftAtMissingStartupPathSavesOnlyWhilePathRemainsAbsent()
+    {
+        ScriptedTextStore store = new();
+        RecordingActivation activation = new();
+        ConfigurationEditorViewModel editor = CreateEditor(
+            Arguments(ActivePath),
+            store,
+            new QueuePathPicker(),
+            activation);
+        await editor.InitializeAsync();
+        editor.ConfigurationText = EmptyConfigurationJson();
+
+        await editor.SaveAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(ConfigurationLoadState.Loaded, editor.LoadState);
+        Assert.Equal(
+            ConfigurationWritePreconditionKind.MustBeMissing,
+            store.LastWriteRequest!.Precondition.Kind);
+        Assert.True(store.Files.ContainsKey(ActivePath));
+        Assert.False(editor.IsDirty);
+        Assert.Single(activation.Configurations);
+        await editor.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ValidDraftAtMissingStartupPathDoesNotReplaceAnAppearingFile()
+    {
+        ScriptedTextStore store = new();
+        RecordingActivation activation = new();
+        ConfigurationEditorViewModel editor = CreateEditor(
+            Arguments(ActivePath),
+            store,
+            new QueuePathPicker(),
+            activation);
+        await editor.InitializeAsync();
+        editor.ConfigurationText = EmptyConfigurationJson();
+        store.Files[ActivePath] = "external";
+
+        await editor.SaveAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(ConfigurationLoadState.Conflict, editor.LoadState);
+        Assert.Equal("external", store.Files[ActivePath]);
+        Assert.True(editor.IsDirty);
+        Assert.Empty(activation.Configurations);
+        Assert.Equal(
+            ConfigurationWritePreconditionKind.MustBeMissing,
+            store.LastWriteRequest!.Precondition.Kind);
+        Assert.Contains(editor.Problems, static problem =>
+            problem.Contains("TargetAlreadyExists", StringComparison.Ordinal));
+        await editor.DisposeAsync();
+    }
+
+    [Fact]
     public async Task MalformedDraftCannotWriteOrReplaceTheActiveConfiguration()
     {
         ScriptedTextStore store = StoreWithActiveConfiguration();
@@ -219,6 +299,39 @@ public sealed class ConfigurationEditorViewModelTests
     }
 
     [Fact]
+    public async Task SaveRejectsAStaleDraftAfterExternalContentChange()
+    {
+        ScriptedTextStore store = StoreWithActiveConfiguration();
+        RecordingActivation activation = new();
+        ConfigurationEditorViewModel editor = CreateEditor(
+            Arguments(ActivePath),
+            store,
+            new QueuePathPicker(),
+            activation);
+        await editor.InitializeAsync();
+        string loaded = store.Files[ActivePath];
+        editor.ConfigurationText = " \r\n" + loaded;
+        store.Files[ActivePath] = EmptyConfigurationJson();
+
+        await editor.SaveAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(ConfigurationLoadState.Conflict, editor.LoadState);
+        Assert.True(editor.IsDirty);
+        Assert.Equal(EmptyConfigurationJson(), store.Files[ActivePath]);
+        Assert.Single(activation.Configurations);
+        Assert.Equal(
+            ConfigurationWritePreconditionKind.MustMatchRevision,
+            store.LastWriteRequest!.Precondition.Kind);
+        Assert.Contains(editor.Problems, static problem =>
+            problem.Contains("ChangedExternally", StringComparison.Ordinal));
+
+        await editor.RevertAsync(TestContext.Current.CancellationToken);
+        Assert.False(editor.IsDirty);
+        Assert.Equal(ConfigurationLoadState.Conflict, editor.LoadState);
+        await editor.DisposeAsync();
+    }
+
+    [Fact]
     public async Task InvalidImportDoesNotReplaceTheDocumentOrRuntime()
     {
         ScriptedTextStore store = StoreWithActiveConfiguration();
@@ -269,6 +382,34 @@ public sealed class ConfigurationEditorViewModelTests
     }
 
     [Fact]
+    public async Task ImportRejectsExternalChangesToTheLoadedActiveDocument()
+    {
+        ScriptedTextStore store = StoreWithActiveConfiguration();
+        store.Files[ImportPath] = EmptyConfigurationJson();
+        QueuePathPicker picker = new(openPaths: [ImportPath]);
+        RecordingActivation activation = new();
+        ConfigurationEditorViewModel editor = CreateEditor(
+            Arguments(ActivePath),
+            store,
+            picker,
+            activation);
+        await editor.InitializeAsync();
+        string external = "external content";
+        store.Files[ActivePath] = external;
+
+        await editor.ImportAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(ConfigurationLoadState.Conflict, editor.LoadState);
+        Assert.Equal(external, store.Files[ActivePath]);
+        Assert.Single(activation.Configurations);
+        Assert.Contains(editor.Problems, static problem =>
+            problem.Contains("ChangedExternally", StringComparison.Ordinal));
+        await editor.ValidateAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(ConfigurationLoadState.Conflict, editor.LoadState);
+        await editor.DisposeAsync();
+    }
+
+    [Fact]
     public async Task ExportWritesOnlyTheChosenDestinationAndKeepsDirtyActiveDraft()
     {
         ScriptedTextStore store = StoreWithActiveConfiguration();
@@ -288,10 +429,147 @@ public sealed class ConfigurationEditorViewModelTests
         Assert.Equal(1, store.WriteCount);
         Assert.Equal(active, store.Files[ActivePath]);
         Assert.True(store.Files.ContainsKey(ExportPath));
+        Assert.Contains(ActivePath, store.LastWriteRequest!.ProtectedPaths);
         Assert.Equal(ActivePath, editor.ConfigurationPath);
         Assert.Equal(ActivePath, editor.ActiveConfigurationPath);
         Assert.True(editor.IsDirty);
         Assert.Single(activation.Configurations);
+        await editor.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task PhysicalExportAliasConflictLeavesTheActiveDocumentUntouched()
+    {
+        ScriptedTextStore store = StoreWithActiveConfiguration();
+        store.WriteResult = ConfigurationTextWriteResult.Conflicted(
+            new ConfigurationWriteConflict(
+                ConfigurationWriteConflictKind.ProtectedPathAlias,
+                "Injected physical alias."));
+        QueuePathPicker picker = new(savePaths: [ExportPath]);
+        RecordingActivation activation = new();
+        ConfigurationEditorViewModel editor = CreateEditor(
+            Arguments(ActivePath),
+            store,
+            picker,
+            activation);
+        await editor.InitializeAsync();
+        string active = store.Files[ActivePath];
+
+        await editor.ExportAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(ConfigurationLoadState.Conflict, editor.LoadState);
+        Assert.Equal(active, store.Files[ActivePath]);
+        Assert.False(store.Files.ContainsKey(ExportPath));
+        Assert.Single(activation.Configurations);
+        Assert.Contains(editor.Problems, static problem =>
+            problem.Contains("ProtectedPathAlias", StringComparison.Ordinal));
+        await editor.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task RuntimeActivationFailureRemainsVisibleAcrossValidateAndRevert()
+    {
+        ScriptedTextStore store = StoreWithActiveConfiguration();
+        RecordingActivation activation = new()
+        {
+            Failure = new InvalidOperationException("Injected activation failure."),
+        };
+        ConfigurationEditorViewModel editor = CreateEditor(
+            Arguments(ActivePath),
+            store,
+            new QueuePathPicker(),
+            activation);
+
+        await editor.InitializeAsync();
+        Assert.Equal(ConfigurationLoadState.RuntimeFailure, editor.LoadState);
+        Assert.Equal("No active configuration", editor.ActiveConfigurationPath);
+
+        await editor.ValidateAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(ConfigurationLoadState.RuntimeFailure, editor.LoadState);
+
+        editor.ConfigurationText = " \r\n" + store.Files[ActivePath];
+        await editor.RevertAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(ConfigurationLoadState.RuntimeFailure, editor.LoadState);
+        Assert.Contains(editor.Problems, static problem =>
+            problem.Contains("Injected activation failure", StringComparison.Ordinal));
+        await editor.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task SuccessfulExportDoesNotHideAnExistingRuntimeFailure()
+    {
+        ScriptedTextStore store = StoreWithActiveConfiguration();
+        RecordingActivation activation = new()
+        {
+            Failure = new InvalidOperationException("Injected activation failure."),
+        };
+        ConfigurationEditorViewModel editor = CreateEditor(
+            Arguments(ActivePath),
+            store,
+            new QueuePathPicker(savePaths: [ExportPath]),
+            activation);
+        await editor.InitializeAsync();
+
+        await editor.ExportAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(ConfigurationLoadState.RuntimeFailure, editor.LoadState);
+        Assert.True(store.Files.ContainsKey(ExportPath));
+        Assert.Contains("exported", editor.Status, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(editor.Problems, static problem =>
+            problem.Contains("Injected activation failure", StringComparison.Ordinal));
+        await editor.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task SuccessfulExportDoesNotHideAnExistingDocumentConflict()
+    {
+        ScriptedTextStore store = StoreWithActiveConfiguration();
+        ConfigurationEditorViewModel editor = CreateEditor(
+            Arguments(ActivePath),
+            store,
+            new QueuePathPicker(savePaths: [ExportPath]),
+            new RecordingActivation());
+        await editor.InitializeAsync();
+        editor.ConfigurationText = " \r\n" + store.Files[ActivePath];
+        store.Files[ActivePath] = EmptyConfigurationJson();
+        await editor.SaveAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(ConfigurationLoadState.Conflict, editor.LoadState);
+
+        await editor.ExportAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(ConfigurationLoadState.Conflict, editor.LoadState);
+        Assert.True(store.Files.ContainsKey(ExportPath));
+        Assert.Contains("exported", editor.Status, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(editor.Problems, static problem =>
+            problem.Contains("ChangedExternally", StringComparison.Ordinal));
+        Assert.True(editor.IsDirty);
+        await editor.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task FailedReplacementActivationKeepsThePreviousActivePathVisible()
+    {
+        ScriptedTextStore store = StoreWithActiveConfiguration();
+        RecordingActivation activation = new();
+        ConfigurationEditorViewModel editor = CreateEditor(
+            Arguments(ActivePath),
+            store,
+            new QueuePathPicker(),
+            activation);
+        await editor.InitializeAsync();
+        activation.Failure = new InvalidOperationException("Injected replacement failure.");
+        editor.ConfigurationText = EmptyConfigurationJson();
+
+        await editor.SaveAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(ConfigurationLoadState.RuntimeFailure, editor.LoadState);
+        Assert.Equal(ActivePath, editor.ActiveConfigurationPath);
+        Assert.False(editor.IsDirty);
+        Assert.Single(activation.Configurations);
+        Assert.Empty(OrganizationConfigurationJsonCodec.Decode(store.Files[ActivePath])
+            .Configuration!.Rules);
+        await editor.ValidateAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(ConfigurationLoadState.RuntimeFailure, editor.LoadState);
         await editor.DisposeAsync();
     }
 
@@ -328,12 +606,12 @@ public sealed class ConfigurationEditorViewModelTests
         TaskCompletionSource writeEntered = CompletionSource();
         TaskCompletionSource writeRelease = CompletionSource();
         ScriptedTextStore store = StoreWithActiveConfiguration();
-        store.WriteAsyncOverride = async (_, content, token) =>
+        store.WriteAsyncOverride = async (request, token) =>
         {
             writeEntered.TrySetResult();
             await writeRelease.Task.WaitAsync(token);
-            store.Files[ActivePath] = content;
-            return ConfigurationTextWriteResult.Succeeded();
+            store.Files[ActivePath] = request.Content;
+            return ConfigurationTextWriteResult.Succeeded(Revision(request.Content));
         };
         RecordingActivation activation = new();
         ConfigurationEditorViewModel editor = CreateEditor(
@@ -457,15 +735,25 @@ public sealed class ConfigurationEditorViewModelTests
     private static TaskCompletionSource CompletionSource() => new(
         TaskCreationOptions.RunContinuationsAsynchronously);
 
+    private static ConfigurationDocumentRevision Revision(string content) =>
+        ConfigurationDocumentRevision.FromBytes(Encoding.UTF8.GetBytes(content));
+
     private sealed class RecordingActivation(Action<OrganizationConfiguration>? observer = null)
     {
         public List<OrganizationConfiguration> Configurations { get; } = [];
+
+        public Exception? Failure { get; set; }
 
         public Task ActivateAsync(
             OrganizationConfiguration configuration,
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (Failure is not null)
+            {
+                throw Failure;
+            }
+
             Configurations.Add(configuration);
             observer?.Invoke(configuration);
             return Task.CompletedTask;
@@ -509,13 +797,15 @@ public sealed class ConfigurationEditorViewModelTests
 
         public int WriteCount { get; private set; }
 
-        public ConfigurationTextWriteResult WriteResult { get; set; } =
-            ConfigurationTextWriteResult.Succeeded();
+        public ConfigurationTextWriteResult? WriteResult { get; set; }
 
         public Action<string, string>? WriteObserver { get; set; }
 
-        public Func<string, string, CancellationToken, ValueTask<ConfigurationTextWriteResult>>?
+        public Func<ConfigurationTextWriteRequest, CancellationToken,
+            ValueTask<ConfigurationTextWriteResult>>?
             WriteAsyncOverride { get; set; }
+
+        public ConfigurationTextWriteRequest? LastWriteRequest { get; private set; }
 
         public Func<string, CancellationToken, ValueTask<ConfigurationTextReadResult>>?
             ReadAsyncOverride { get; set; }
@@ -530,28 +820,65 @@ public sealed class ConfigurationEditorViewModelTests
                 ? ReadAsyncOverride(path, cancellationToken)
                 : ValueTask.FromResult(
                     Files.TryGetValue(path, out string? content)
-                        ? ConfigurationTextReadResult.Found(content)
+                        ? ConfigurationTextReadResult.Found(content, Revision(content))
                         : ConfigurationTextReadResult.NotFound());
         }
 
         public async ValueTask<ConfigurationTextWriteResult> WriteAsync(
-            string path,
-            string content,
+            ConfigurationTextWriteRequest request,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             WriteCount++;
-            WriteObserver?.Invoke(path, content);
+            LastWriteRequest = request;
+            WriteObserver?.Invoke(request.Path, request.Content);
             ConfigurationTextWriteResult result = WriteAsyncOverride is null
-                ? WriteResult
-                : await WriteAsyncOverride(path, content, cancellationToken);
+                ? WriteResult ?? EvaluateWrite(request)
+                : await WriteAsyncOverride(request, cancellationToken);
             if (result.Status == ConfigurationTextWriteStatus.Succeeded
                 && WriteAsyncOverride is null)
             {
-                Files[path] = content;
+                Files[request.Path] = request.Content;
             }
 
             return result;
         }
+
+        private ConfigurationTextWriteResult EvaluateWrite(
+            ConfigurationTextWriteRequest request)
+        {
+            bool exists = Files.TryGetValue(request.Path, out string? current);
+            if (request.Precondition.Kind == ConfigurationWritePreconditionKind.MustBeMissing
+                && exists)
+            {
+                return Conflict(ConfigurationWriteConflictKind.TargetAlreadyExists);
+            }
+
+            if (request.Precondition.Kind
+                    == ConfigurationWritePreconditionKind.MustMatchRevision
+                && (!exists || Revision(current!) != request.Precondition.ExpectedRevision))
+            {
+                return Conflict(ConfigurationWriteConflictKind.ChangedExternally);
+            }
+
+            bool protectedAlias = request.ProtectedPaths.Any(protectedPath =>
+                string.Equals(
+                    Path.GetFullPath(request.Path),
+                    Path.GetFullPath(protectedPath),
+                    OperatingSystem.IsWindows()
+                        ? StringComparison.OrdinalIgnoreCase
+                        : StringComparison.Ordinal));
+            if (protectedAlias)
+            {
+                return Conflict(ConfigurationWriteConflictKind.ProtectedPathAlias);
+            }
+
+            return ConfigurationTextWriteResult.Succeeded(Revision(request.Content));
+        }
+
+        private static ConfigurationTextWriteResult Conflict(
+            ConfigurationWriteConflictKind kind) =>
+            ConfigurationTextWriteResult.Conflicted(
+                new ConfigurationWriteConflict(kind, "Injected conflict."));
     }
 }

@@ -7,6 +7,8 @@ public enum ConfigurationStorageProblemKind
     Inaccessible,
     ReadFailure,
     WriteFailure,
+    PublicationSynchronizationUnavailable,
+    PublicationSynchronizationCanceled,
     AtomicPublicationUnavailable,
     PublicationFailure,
 }

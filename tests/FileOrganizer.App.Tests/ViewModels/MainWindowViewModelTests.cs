@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using FileOrganizer.App.Services;
 using FileOrganizer.App.Startup;
 using FileOrganizer.App.ViewModels;
@@ -28,7 +29,8 @@ public sealed class MainWindowViewModelTests
             new OrganizationConfigurationService(store),
             factory,
             new QueuedDispatcher(),
-            new NullPathPicker());
+            new NullPathPicker(),
+            new ScriptedUnsavedChangesPrompt());
 
         await viewModel.InitializeAsync();
 
@@ -58,7 +60,7 @@ public sealed class MainWindowViewModelTests
     [Fact]
     public async Task MalformedConfigurationSurfacesValidationWithoutStartingRuntime()
     {
-        ScriptedTextStore store = new(ConfigurationTextReadResult.Found("{ nope"));
+        ScriptedTextStore store = new(Found("{ nope"));
         RecordingRuntimeFactory factory = new();
         MainWindowViewModel viewModel = CreateViewModel(store, factory, new QueuedDispatcher());
 
@@ -95,7 +97,7 @@ public sealed class MainWindowViewModelTests
     [Fact]
     public async Task RuntimeSnapshotIsProjectedInConfiguredOrderOnlyAfterUiDispatch()
     {
-        ScriptedTextStore store = new(ConfigurationTextReadResult.Found(ConfigurationJson()));
+        ScriptedTextStore store = new(Found(ConfigurationJson()));
         QueuedDispatcher dispatcher = new();
         RecordingRuntimeFactory factory = new();
         MainWindowViewModel viewModel = CreateViewModel(store, factory, dispatcher);
@@ -127,7 +129,7 @@ public sealed class MainWindowViewModelTests
     [Fact]
     public async Task OlderNotificationQueuedDuringStartCannotReplaceNewerSnapshot()
     {
-        ScriptedTextStore store = new(ConfigurationTextReadResult.Found(ConfigurationJson()));
+        ScriptedTextStore store = new(Found(ConfigurationJson()));
         QueuedDispatcher dispatcher = new();
         RecordingRuntimeFactory factory = new()
         {
@@ -150,7 +152,7 @@ public sealed class MainWindowViewModelTests
     [Fact]
     public async Task RootCommandsUseRuntimeBoundaryAndDisposalIsJoined()
     {
-        ScriptedTextStore store = new(ConfigurationTextReadResult.Found(ConfigurationJson()));
+        ScriptedTextStore store = new(Found(ConfigurationJson()));
         RecordingRuntimeFactory factory = new();
         QueuedDispatcher dispatcher = new();
         MainWindowViewModel viewModel = CreateViewModel(store, factory, dispatcher);
@@ -160,6 +162,7 @@ public sealed class MainWindowViewModelTests
         WatchRootViewModel root = viewModel.Roots[0];
         Assert.True(root.PauseCommand.CanExecute(null));
         Assert.True(root.RetryCommand.CanExecute(null));
+        Assert.False(root.ReconnectCommand.CanExecute(null));
         root.RetryCommand.Execute(null);
         root.PauseCommand.Execute(null);
 
@@ -171,8 +174,18 @@ public sealed class MainWindowViewModelTests
         Assert.True(root.ResumeCommand.CanExecute(null));
         root.ResumeCommand.Execute(null);
 
+        runtime.Publish(
+            SnapshotWithFirstState(factory.Configuration!, WatchRootState.Faulted, 2),
+            [FirstRootId]);
+        dispatcher.RunAll();
+        root = viewModel.Roots[0];
+        Assert.True(root.ReconnectCommand.CanExecute(null));
+        Assert.False(root.RetryCommand.CanExecute(null));
+        root.ReconnectCommand.Execute(null);
+
         Assert.Equal(FirstRootId, Assert.Single(runtime.Paused));
         Assert.Equal(FirstRootId, Assert.Single(runtime.Resumed));
+        Assert.Equal(FirstRootId, Assert.Single(runtime.Reconnected));
         Assert.Equal(FirstRootId, Assert.Single(runtime.BaselineRequests));
 
         runtime.BlockDisposal();
@@ -189,15 +202,32 @@ public sealed class MainWindowViewModelTests
     [Fact]
     public async Task SavedConfigurationDisposesOldRuntimeAcceptsNewRevisionZeroAndIgnoresQueuedOldEvents()
     {
-        ScriptedTextStore store = new(ConfigurationTextReadResult.Found(ConfigurationJson()))
+        ScriptedTextStore store = new(Found(ConfigurationJson()))
         {
             AllowWrites = true,
         };
         QueuedDispatcher dispatcher = new();
-        RecordingRuntimeFactory factory = new();
-        MainWindowViewModel viewModel = CreateViewModel(store, factory, dispatcher);
+        FakeRuntime? oldRuntime = null;
+        MainWindowViewModel? viewModel = null;
+        RecordingRuntimeFactory factory = new()
+        {
+            RuntimeSetup = (configuration, runtime) =>
+            {
+                if (configuration.WatchRoots.Count == 1)
+                {
+                    runtime.StartAction = () =>
+                    {
+                        Assert.NotNull(oldRuntime);
+                        Assert.False(oldRuntime.Disposed);
+                        Assert.Equal([FirstRootId, SecondRootId], viewModel!.Roots.Select(static root => root.Id));
+                        Assert.Equal(WatchRootState.Synchronized.ToString(), viewModel.Roots[0].State);
+                    };
+                }
+            },
+        };
+        viewModel = CreateViewModel(store, factory, dispatcher);
         await viewModel.InitializeAsync();
-        FakeRuntime oldRuntime = Assert.IsType<FakeRuntime>(factory.Runtime);
+        oldRuntime = Assert.IsType<FakeRuntime>(factory.Runtime);
         oldRuntime.Publish(
             SnapshotWithFirstState(factory.Configuration!, WatchRootState.Synchronized, 5),
             [FirstRootId]);
@@ -224,12 +254,155 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task RuntimeCreationFailurePreservesActiveRuntimeAndVisibleSnapshot()
+    {
+        ScriptedTextStore store = new(Found(ConfigurationJson()))
+        {
+            AllowWrites = true,
+        };
+        QueuedDispatcher dispatcher = new();
+        RecordingRuntimeFactory factory = new()
+        {
+            CreateFailure = static configuration => configuration.WatchRoots.Count == 1
+                ? new InvalidOperationException("Creation failed.")
+                : null,
+        };
+        MainWindowViewModel viewModel = CreateViewModel(store, factory, dispatcher);
+        await viewModel.InitializeAsync();
+        FakeRuntime oldRuntime = Assert.IsType<FakeRuntime>(factory.Runtime);
+        OrganizationConfiguration oldConfiguration = factory.Configuration!;
+        oldRuntime.Publish(
+            SnapshotWithFirstState(oldConfiguration, WatchRootState.Synchronized, 5),
+            [FirstRootId]);
+        dispatcher.RunAll();
+
+        viewModel.Editor.ConfigurationText = SingleRootConfigurationJson();
+        await viewModel.Editor.SaveAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(ConfigurationLoadState.RuntimeFailure, viewModel.LoadState);
+        Assert.Equal(2, factory.CreateCount);
+        Assert.False(oldRuntime.Disposed);
+        Assert.Equal([FirstRootId, SecondRootId], viewModel.Roots.Select(static root => root.Id));
+        Assert.Equal(WatchRootState.Synchronized.ToString(), viewModel.Roots[0].State);
+
+        oldRuntime.Publish(
+            SnapshotWithFirstState(oldConfiguration, WatchRootState.RescanRequired, 6),
+            [FirstRootId]);
+        dispatcher.RunAll();
+
+        Assert.Equal(WatchRootState.RescanRequired.ToString(), viewModel.Roots[0].State);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task RuntimeStartFailureDisposesCandidateAndPreservesActiveRuntimeAndQueuedSnapshotFence()
+    {
+        ScriptedTextStore store = new(Found(ConfigurationJson()))
+        {
+            AllowWrites = true,
+        };
+        QueuedDispatcher dispatcher = new();
+        RecordingRuntimeFactory factory = new()
+        {
+            RuntimeSetup = static (configuration, runtime) =>
+            {
+                if (configuration.WatchRoots.Count == 1)
+                {
+                    runtime.StartAction = () =>
+                    {
+                        runtime.Publish(
+                            SnapshotWithFirstState(
+                                configuration,
+                                WatchRootState.RescanRequired,
+                                1),
+                            [SecondRootId]);
+                        throw new InvalidOperationException("Start failed.");
+                    };
+                }
+            },
+        };
+        MainWindowViewModel viewModel = CreateViewModel(store, factory, dispatcher);
+        await viewModel.InitializeAsync();
+        FakeRuntime oldRuntime = Assert.IsType<FakeRuntime>(factory.Runtime);
+        OrganizationConfiguration oldConfiguration = factory.Configuration!;
+        oldRuntime.Publish(
+            SnapshotWithFirstState(oldConfiguration, WatchRootState.Synchronized, 5),
+            [FirstRootId]);
+        dispatcher.RunAll();
+
+        viewModel.Editor.ConfigurationText = SingleRootConfigurationJson();
+        await viewModel.Editor.SaveAsync(TestContext.Current.CancellationToken);
+
+        FakeRuntime failedRuntime = factory.Runtimes[1];
+        Assert.Equal(ConfigurationLoadState.RuntimeFailure, viewModel.LoadState);
+        Assert.True(failedRuntime.Disposed);
+        Assert.False(oldRuntime.Disposed);
+        Assert.Equal([FirstRootId, SecondRootId], viewModel.Roots.Select(static root => root.Id));
+
+        dispatcher.RunAll();
+
+        Assert.Equal([FirstRootId, SecondRootId], viewModel.Roots.Select(static root => root.Id));
+        oldRuntime.Publish(
+            SnapshotWithFirstState(oldConfiguration, WatchRootState.RescanRequired, 6),
+            [FirstRootId]);
+        dispatcher.RunAll();
+        Assert.Equal(WatchRootState.RescanRequired.ToString(), viewModel.Roots[0].State);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task CancellationDuringCandidateStartDisposesCandidateAndPreservesActiveRuntimeAndSnapshot()
+    {
+        using CancellationTokenSource cancellation = new();
+        ScriptedTextStore store = new(Found(ConfigurationJson()))
+        {
+            AllowWrites = true,
+        };
+        QueuedDispatcher dispatcher = new();
+        RecordingRuntimeFactory factory = new()
+        {
+            RuntimeSetup = (configuration, runtime) =>
+            {
+                if (configuration.WatchRoots.Count == 1)
+                {
+                    runtime.StartAction = cancellation.Cancel;
+                }
+            },
+        };
+        MainWindowViewModel viewModel = CreateViewModel(store, factory, dispatcher);
+        await viewModel.InitializeAsync();
+        FakeRuntime oldRuntime = Assert.IsType<FakeRuntime>(factory.Runtime);
+        OrganizationConfiguration oldConfiguration = factory.Configuration!;
+        oldRuntime.Publish(
+            SnapshotWithFirstState(oldConfiguration, WatchRootState.Synchronized, 5),
+            [FirstRootId]);
+        dispatcher.RunAll();
+
+        viewModel.Editor.ConfigurationText = SingleRootConfigurationJson();
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => viewModel.Editor.SaveAsync(cancellation.Token));
+
+        FakeRuntime cancelledRuntime = factory.Runtimes[1];
+        Assert.True(cancelledRuntime.Disposed);
+        Assert.False(oldRuntime.Disposed);
+        Assert.Equal([FirstRootId, SecondRootId], viewModel.Roots.Select(static root => root.Id));
+        Assert.Equal(WatchRootState.Synchronized.ToString(), viewModel.Roots[0].State);
+
+        oldRuntime.Publish(
+            SnapshotWithFirstState(oldConfiguration, WatchRootState.RescanRequired, 6),
+            [FirstRootId]);
+        dispatcher.RunAll();
+        Assert.Equal(WatchRootState.RescanRequired.ToString(), viewModel.Roots[0].State);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
     public async Task ShutdownObservesNonCancellationInitializationCleanupFailureWithoutFaultingInitializer()
     {
         CancellationToken testCancellation = TestContext.Current.CancellationToken;
         using ManualResetEventSlim startEntered = new();
         using ManualResetEventSlim releaseStart = new();
-        ScriptedTextStore store = new(ConfigurationTextReadResult.Found(ConfigurationJson()));
+        ScriptedTextStore store = new(Found(ConfigurationJson()));
         RecordingRuntimeFactory factory = new()
         {
             RuntimeSetup = (_, runtime) =>
@@ -258,7 +431,7 @@ public sealed class MainWindowViewModelTests
     [Fact]
     public async Task DisposalPreservesInitializationFailureWhenNoCleanupFailureWasRecorded()
     {
-        ScriptedTextStore store = new(ConfigurationTextReadResult.Found(ConfigurationJson()));
+        ScriptedTextStore store = new(Found(ConfigurationJson()));
         RecordingRuntimeFactory factory = new();
         MainWindowViewModel viewModel = CreateViewModel(store, factory, new QueuedDispatcher());
         viewModel.PropertyChanged += static (_, _) =>
@@ -273,10 +446,251 @@ public sealed class MainWindowViewModelTests
         Assert.Same(initializationFailure, disposalFailure);
     }
 
+    [Fact]
+    public async Task CleanCloseRequestDoesNotPromptOrWrite()
+    {
+        ScriptedTextStore store = new(Found(ConfigurationJson()));
+        var prompt = new ScriptedUnsavedChangesPrompt(UnsavedChangesDecision.Discard);
+        MainWindowViewModel viewModel = CreateViewModel(
+            store,
+            new RecordingRuntimeFactory(),
+            new QueuedDispatcher(),
+            prompt);
+        await viewModel.InitializeAsync();
+
+        bool closeApproved = await viewModel.RequestCloseAsync(
+            TestContext.Current.CancellationToken);
+
+        Assert.True(closeApproved);
+        Assert.Equal(0, prompt.PromptCount);
+        Assert.Equal(0, store.WriteCount);
+        await viewModel.DisposeAsync();
+    }
+
+    [Theory]
+    [InlineData(UnsavedChangesDecision.Cancel)]
+    [InlineData((UnsavedChangesDecision)999)]
+    public async Task CancelOrUnknownCloseDecisionKeepsDirtyWorkspaceOpen(
+        UnsavedChangesDecision decision)
+    {
+        ScriptedTextStore store = new(Found(ConfigurationJson()));
+        var prompt = new ScriptedUnsavedChangesPrompt(decision);
+        MainWindowViewModel viewModel = CreateViewModel(
+            store,
+            new RecordingRuntimeFactory(),
+            new QueuedDispatcher(),
+            prompt);
+        await viewModel.InitializeAsync();
+        viewModel.Editor.ConfigurationText = SingleRootConfigurationJson();
+
+        bool closeApproved = await viewModel.RequestCloseAsync(
+            TestContext.Current.CancellationToken);
+
+        Assert.False(closeApproved);
+        Assert.True(viewModel.Editor.IsDirty);
+        Assert.Equal(1, prompt.PromptCount);
+        Assert.Equal(viewModel.ConfigurationPath, Assert.Single(prompt.ConfigurationPaths));
+        Assert.Equal(0, store.WriteCount);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task DiscardCloseDecisionApprovesWithoutPersistingDraft()
+    {
+        ScriptedTextStore store = new(Found(ConfigurationJson()));
+        var prompt = new ScriptedUnsavedChangesPrompt(UnsavedChangesDecision.Discard);
+        MainWindowViewModel viewModel = CreateViewModel(
+            store,
+            new RecordingRuntimeFactory(),
+            new QueuedDispatcher(),
+            prompt);
+        await viewModel.InitializeAsync();
+        viewModel.Editor.ConfigurationText = SingleRootConfigurationJson();
+
+        bool closeApproved = await viewModel.RequestCloseAsync(
+            TestContext.Current.CancellationToken);
+
+        Assert.True(closeApproved);
+        Assert.True(viewModel.Editor.IsDirty);
+        Assert.Equal(0, store.WriteCount);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task SaveCloseDecisionApprovesOnlyAfterDraftIsPersisted()
+    {
+        ScriptedTextStore store = new(Found(ConfigurationJson()))
+        {
+            AllowWrites = true,
+        };
+        var prompt = new ScriptedUnsavedChangesPrompt(UnsavedChangesDecision.Save);
+        MainWindowViewModel viewModel = CreateViewModel(
+            store,
+            new RecordingRuntimeFactory(),
+            new QueuedDispatcher(),
+            prompt);
+        await viewModel.InitializeAsync();
+        viewModel.Editor.ConfigurationText = SingleRootConfigurationJson();
+
+        bool closeApproved = await viewModel.RequestCloseAsync(
+            TestContext.Current.CancellationToken);
+
+        Assert.True(closeApproved);
+        Assert.False(viewModel.Editor.IsDirty);
+        Assert.Equal(1, store.WriteCount);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task InvalidDraftSaveCloseDecisionKeepsWorkspaceOpenWithoutWriting()
+    {
+        ScriptedTextStore store = new(Found(ConfigurationJson()));
+        var prompt = new ScriptedUnsavedChangesPrompt(UnsavedChangesDecision.Save);
+        MainWindowViewModel viewModel = CreateViewModel(
+            store,
+            new RecordingRuntimeFactory(),
+            new QueuedDispatcher(),
+            prompt);
+        await viewModel.InitializeAsync();
+        viewModel.Editor.ConfigurationText = "{ nope";
+
+        bool closeApproved = await viewModel.RequestCloseAsync(
+            TestContext.Current.CancellationToken);
+
+        Assert.False(closeApproved);
+        Assert.True(viewModel.Editor.IsDirty);
+        Assert.Equal(ConfigurationLoadState.Invalid, viewModel.LoadState);
+        Assert.Equal(0, store.WriteCount);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task StorageFailureDuringCloseSaveKeepsDirtyWorkspaceOpen()
+    {
+        ScriptedTextStore store = new(Found(ConfigurationJson()))
+        {
+            AllowWrites = true,
+            WriteResult = ConfigurationTextWriteResult.Failed(
+                [
+                    new ConfigurationStorageProblem(
+                        ConfigurationStorageProblemKind.PublicationFailure,
+                        "Publication failed."),
+                ]),
+        };
+        var prompt = new ScriptedUnsavedChangesPrompt(UnsavedChangesDecision.Save);
+        MainWindowViewModel viewModel = CreateViewModel(
+            store,
+            new RecordingRuntimeFactory(),
+            new QueuedDispatcher(),
+            prompt);
+        await viewModel.InitializeAsync();
+        viewModel.Editor.ConfigurationText = SingleRootConfigurationJson();
+
+        bool closeApproved = await viewModel.RequestCloseAsync(
+            TestContext.Current.CancellationToken);
+
+        Assert.False(closeApproved);
+        Assert.True(viewModel.Editor.IsDirty);
+        Assert.Equal(ConfigurationLoadState.StorageFailure, viewModel.LoadState);
+        Assert.Equal(1, store.WriteCount);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task CandidateSnapshotPublishedBeforeSwapIsCaughtUpAfterCommit()
+    {
+        ScriptedTextStore store = new(Found(ConfigurationJson()));
+        RecordingRuntimeFactory factory = new()
+        {
+            RuntimeSetup = static (configuration, runtime) =>
+            {
+                runtime.SnapshotReadAction = () => runtime.Publish(
+                    SnapshotWithFirstState(
+                        configuration,
+                        WatchRootState.Synchronized,
+                        1),
+                    [FirstRootId]);
+            },
+        };
+        MainWindowViewModel viewModel = CreateViewModel(
+            store,
+            factory,
+            new InlineDispatcher());
+
+        await viewModel.InitializeAsync();
+
+        Assert.Equal(WatchRootState.Synchronized.ToString(), viewModel.Roots[0].State);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task PreviousRuntimeCleanupFailureDoesNotMisclassifyCommittedReplacement()
+    {
+        ScriptedTextStore store = new(Found(ConfigurationJson()))
+        {
+            AllowWrites = true,
+        };
+        RecordingRuntimeFactory factory = new();
+        MainWindowViewModel viewModel = CreateViewModel(
+            store,
+            factory,
+            new QueuedDispatcher());
+        await viewModel.InitializeAsync();
+        FakeRuntime previous = Assert.IsType<FakeRuntime>(factory.Runtime);
+        previous.DisposeFailure = new IOException("Previous cleanup failed.");
+        viewModel.Editor.ConfigurationText = SingleRootConfigurationJson();
+
+        await viewModel.Editor.SaveAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(ConfigurationLoadState.Loaded, viewModel.LoadState);
+        Assert.False(viewModel.Editor.IsDirty);
+        Assert.Equal(SecondRootId, Assert.Single(viewModel.Roots).Id);
+        Assert.False(previous.Disposed);
+        IOException cleanupFailure = await Assert.ThrowsAsync<IOException>(
+            () => viewModel.DisposeAsync().AsTask());
+        Assert.Equal("Previous cleanup failed.", cleanupFailure.Message);
+    }
+
+    [Fact]
+    public async Task PostCommitRootsNotificationFailureDoesNotMisclassifyReplacement()
+    {
+        ScriptedTextStore store = new(Found(ConfigurationJson()))
+        {
+            AllowWrites = true,
+        };
+        RecordingRuntimeFactory factory = new();
+        MainWindowViewModel viewModel = CreateViewModel(
+            store,
+            factory,
+            new QueuedDispatcher());
+        await viewModel.InitializeAsync();
+        FakeRuntime previous = Assert.IsType<FakeRuntime>(factory.Runtime);
+        bool rejectNextRootsNotification = true;
+        viewModel.PropertyChanged += (_, eventArgs) =>
+        {
+            if (rejectNextRootsNotification
+                && eventArgs.PropertyName == nameof(MainWindowViewModel.Roots))
+            {
+                rejectNextRootsNotification = false;
+                throw new InvalidOperationException("Presentation subscriber failed.");
+            }
+        };
+        viewModel.Editor.ConfigurationText = SingleRootConfigurationJson();
+
+        await viewModel.Editor.SaveAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(ConfigurationLoadState.Loaded, viewModel.LoadState);
+        Assert.False(viewModel.Editor.IsDirty);
+        Assert.Equal(SecondRootId, Assert.Single(viewModel.Roots).Id);
+        Assert.True(previous.Disposed);
+        await viewModel.DisposeAsync();
+    }
+
     private static MainWindowViewModel CreateViewModel(
         ScriptedTextStore store,
         RecordingRuntimeFactory factory,
-        QueuedDispatcher dispatcher)
+        IUiDispatcher dispatcher,
+        IUnsavedChangesPrompt? unsavedChangesPrompt = null)
     {
         string path = Path.Combine(Path.GetTempPath(), "file-organizer-tests", "config.json");
         return new MainWindowViewModel(
@@ -284,8 +698,14 @@ public sealed class MainWindowViewModelTests
             new OrganizationConfigurationService(store),
             factory,
             dispatcher,
-            new NullPathPicker());
+            new NullPathPicker(),
+            unsavedChangesPrompt ?? new ScriptedUnsavedChangesPrompt());
     }
+
+    private static ConfigurationTextReadResult Found(string content) =>
+        ConfigurationTextReadResult.Found(
+            content,
+            ConfigurationDocumentRevision.FromBytes(Encoding.UTF8.GetBytes(content)));
 
     private static WatchPreviewRuntimeSnapshot SnapshotWithHistoricalPreview(
         OrganizationConfiguration configuration)
@@ -424,6 +844,8 @@ public sealed class MainWindowViewModelTests
 
         public bool AllowWrites { get; init; }
 
+        public ConfigurationTextWriteResult? WriteResult { get; init; }
+
         public ValueTask<ConfigurationTextReadResult> ReadAsync(
             string path,
             CancellationToken cancellationToken = default)
@@ -434,10 +856,10 @@ public sealed class MainWindowViewModelTests
         }
 
         public ValueTask<ConfigurationTextWriteResult> WriteAsync(
-            string path,
-            string content,
+            ConfigurationTextWriteRequest request,
             CancellationToken cancellationToken = default)
         {
+            ArgumentNullException.ThrowIfNull(request);
             cancellationToken.ThrowIfCancellationRequested();
             WriteCount++;
             if (!AllowWrites)
@@ -446,7 +868,11 @@ public sealed class MainWindowViewModelTests
                     "This test did not authorize a configuration write.");
             }
 
-            return ValueTask.FromResult(ConfigurationTextWriteResult.Succeeded());
+            return ValueTask.FromResult(
+                WriteResult
+                ?? ConfigurationTextWriteResult.Succeeded(
+                    ConfigurationDocumentRevision.FromBytes(
+                        Encoding.UTF8.GetBytes(request.Content))));
         }
     }
 
@@ -462,9 +888,17 @@ public sealed class MainWindowViewModelTests
 
         public Action<OrganizationConfiguration, FakeRuntime>? RuntimeSetup { get; init; }
 
+        public Func<OrganizationConfiguration, Exception?>? CreateFailure { get; init; }
+
         public IWatchPreviewRuntime Create(OrganizationConfiguration configuration)
         {
             CreateCount++;
+            Exception? failure = CreateFailure?.Invoke(configuration);
+            if (failure is not null)
+            {
+                throw failure;
+            }
+
             Configuration = configuration;
             var runtime = new FakeRuntime(InitialSnapshot(configuration));
             RuntimeSetup?.Invoke(configuration, runtime);
@@ -494,17 +928,31 @@ public sealed class MainWindowViewModelTests
     private sealed class FakeRuntime(WatchPreviewRuntimeSnapshot snapshot) : IWatchPreviewRuntime
     {
         private TaskCompletionSource? _disposeRelease;
+        private WatchPreviewRuntimeSnapshot _snapshot = snapshot;
         private WatchPreviewRuntimeSnapshot? _startNotification;
         private WatchPreviewRuntimeSnapshot? _postStartSnapshot;
         private Guid[]? _startChangedRootIds;
 
         public event EventHandler<WatchPreviewRuntimeNotification>? SnapshotChanged;
 
-        public WatchPreviewRuntimeSnapshot Snapshot { get; private set; } = snapshot;
+        public WatchPreviewRuntimeSnapshot Snapshot
+        {
+            get
+            {
+                WatchPreviewRuntimeSnapshot captured = _snapshot;
+                Action? action = SnapshotReadAction;
+                SnapshotReadAction = null;
+                action?.Invoke();
+                return captured;
+            }
+            private set => _snapshot = value;
+        }
 
         public List<Guid> Paused { get; } = [];
 
         public List<Guid> Resumed { get; } = [];
+
+        public List<Guid> Reconnected { get; } = [];
 
         public List<Guid> BaselineRequests { get; } = [];
 
@@ -513,6 +961,8 @@ public sealed class MainWindowViewModelTests
         public bool DisposalStarted { get; private set; }
 
         public Action? StartAction { get; set; }
+
+        public Action? SnapshotReadAction { get; set; }
 
         public Exception? DisposeFailure { get; set; }
 
@@ -542,6 +992,12 @@ public sealed class MainWindowViewModelTests
         public bool ResumeRoot(Guid watchRootId)
         {
             Resumed.Add(watchRootId);
+            return true;
+        }
+
+        public bool ReconnectRoot(Guid watchRootId)
+        {
+            Reconnected.Add(watchRootId);
             return true;
         }
 
@@ -613,6 +1069,11 @@ public sealed class MainWindowViewModelTests
         }
     }
 
+    private sealed class InlineDispatcher : IUiDispatcher
+    {
+        public void Post(Action action) => action();
+    }
+
     private sealed class NullPathPicker : IConfigurationPathPicker
     {
         public ValueTask<string?> OpenExistingAsync(
@@ -628,6 +1089,25 @@ public sealed class MainWindowViewModelTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             return ValueTask.FromResult<string?>(null);
+        }
+    }
+
+    private sealed class ScriptedUnsavedChangesPrompt(
+        UnsavedChangesDecision decision = UnsavedChangesDecision.Cancel)
+        : IUnsavedChangesPrompt
+    {
+        public int PromptCount { get; private set; }
+
+        public List<string> ConfigurationPaths { get; } = [];
+
+        public ValueTask<UnsavedChangesDecision> PromptAsync(
+            string configurationPath,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            PromptCount++;
+            ConfigurationPaths.Add(configurationPath);
+            return ValueTask.FromResult(decision);
         }
     }
 }

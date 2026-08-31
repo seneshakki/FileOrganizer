@@ -13,6 +13,8 @@ public interface IWatchPreviewRuntime : IAsyncDisposable
 
     bool ResumeRoot(Guid watchRootId);
 
+    bool ReconnectRoot(Guid watchRootId);
+
     bool RequestBaselineScan(Guid watchRootId);
 
     ValueTask DrainAsync(CancellationToken cancellationToken = default);

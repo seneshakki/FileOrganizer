@@ -10,14 +10,18 @@ public sealed class ConfigurationTextReadResult
     private ConfigurationTextReadResult(
         ConfigurationTextReadStatus status,
         string? content,
+        ConfigurationDocumentRevision? revision,
         IEnumerable<ConfigurationStorageProblem>? problems)
     {
         ConfigurationStorageProblem[] snapshot = Snapshot(problems);
         bool valid = status switch
         {
-            ConfigurationTextReadStatus.Found => content is not null && snapshot.Length == 0,
-            ConfigurationTextReadStatus.NotFound => content is null && snapshot.Length == 0,
-            ConfigurationTextReadStatus.Failed => content is null && snapshot.Length != 0,
+            ConfigurationTextReadStatus.Found =>
+                content is not null && revision is not null && snapshot.Length == 0,
+            ConfigurationTextReadStatus.NotFound =>
+                content is null && revision is null && snapshot.Length == 0,
+            ConfigurationTextReadStatus.Failed =>
+                content is null && revision is null && snapshot.Length != 0,
             _ => false,
         };
         if (!valid)
@@ -29,6 +33,7 @@ public sealed class ConfigurationTextReadResult
 
         Status = status;
         Content = content;
+        Revision = revision;
         _problems = Array.AsReadOnly(snapshot);
     }
 
@@ -36,20 +41,25 @@ public sealed class ConfigurationTextReadResult
 
     public string? Content { get; }
 
+    public ConfigurationDocumentRevision? Revision { get; }
+
     public IReadOnlyList<ConfigurationStorageProblem> Problems => _problems;
 
-    public static ConfigurationTextReadResult Found(string content)
+    public static ConfigurationTextReadResult Found(
+        string content,
+        ConfigurationDocumentRevision revision)
     {
         ArgumentNullException.ThrowIfNull(content);
-        return new(ConfigurationTextReadStatus.Found, content, null);
+        ArgumentNullException.ThrowIfNull(revision);
+        return new(ConfigurationTextReadStatus.Found, content, revision, null);
     }
 
     public static ConfigurationTextReadResult NotFound() =>
-        new(ConfigurationTextReadStatus.NotFound, null, null);
+        new(ConfigurationTextReadStatus.NotFound, null, null, null);
 
     public static ConfigurationTextReadResult Failed(
         IEnumerable<ConfigurationStorageProblem> problems) =>
-        new(ConfigurationTextReadStatus.Failed, null, problems);
+        new(ConfigurationTextReadStatus.Failed, null, null, problems);
 
     private static ConfigurationStorageProblem[] Snapshot(
         IEnumerable<ConfigurationStorageProblem>? problems)

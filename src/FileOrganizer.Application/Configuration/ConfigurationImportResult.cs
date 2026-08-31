@@ -11,6 +11,8 @@ public sealed class ConfigurationImportResult
     private ConfigurationImportResult(
         ConfigurationImportStatus status,
         OrganizationConfiguration? configuration,
+        ConfigurationDocumentRevision? revision,
+        ConfigurationWriteConflict? conflict,
         IEnumerable<ConfigurationProblem>? configurationProblems,
         IEnumerable<ConfigurationStorageProblem>? storageProblems)
     {
@@ -20,18 +22,32 @@ public sealed class ConfigurationImportResult
         {
             ConfigurationImportStatus.Imported =>
                 configuration is not null
+                && revision is not null
+                && conflict is null
                 && configurationSnapshot.Length == 0
                 && storageSnapshot.Length == 0,
             ConfigurationImportStatus.SourceNotFound =>
                 configuration is null
+                && revision is null
+                && conflict is null
                 && configurationSnapshot.Length == 0
                 && storageSnapshot.Length == 0,
             ConfigurationImportStatus.Invalid =>
                 configuration is null
+                && revision is null
+                && conflict is null
                 && configurationSnapshot.Length != 0
+                && storageSnapshot.Length == 0,
+            ConfigurationImportStatus.Conflict =>
+                configuration is null
+                && revision is null
+                && conflict is not null
+                && configurationSnapshot.Length == 0
                 && storageSnapshot.Length == 0,
             ConfigurationImportStatus.StorageFailure =>
                 configuration is null
+                && revision is null
+                && conflict is null
                 && configurationSnapshot.Length == 0
                 && storageSnapshot.Length != 0,
             _ => false,
@@ -43,6 +59,8 @@ public sealed class ConfigurationImportResult
 
         Status = status;
         Configuration = configuration;
+        Revision = revision;
+        Conflict = conflict;
         _configurationProblems = Array.AsReadOnly(configurationSnapshot);
         _storageProblems = Array.AsReadOnly(storageSnapshot);
     }
@@ -51,20 +69,29 @@ public sealed class ConfigurationImportResult
 
     public OrganizationConfiguration? Configuration { get; }
 
+    public ConfigurationDocumentRevision? Revision { get; }
+
+    public ConfigurationWriteConflict? Conflict { get; }
+
     public IReadOnlyList<ConfigurationProblem> ConfigurationProblems => _configurationProblems;
 
     public IReadOnlyList<ConfigurationStorageProblem> StorageProblems => _storageProblems;
 
-    internal static ConfigurationImportResult Imported(OrganizationConfiguration configuration) =>
-        new(ConfigurationImportStatus.Imported, configuration, null, null);
+    internal static ConfigurationImportResult Imported(
+        OrganizationConfiguration configuration,
+        ConfigurationDocumentRevision revision) =>
+        new(ConfigurationImportStatus.Imported, configuration, revision, null, null, null);
 
     internal static ConfigurationImportResult SourceNotFound() =>
-        new(ConfigurationImportStatus.SourceNotFound, null, null, null);
+        new(ConfigurationImportStatus.SourceNotFound, null, null, null, null, null);
 
     internal static ConfigurationImportResult Invalid(IEnumerable<ConfigurationProblem> problems) =>
-        new(ConfigurationImportStatus.Invalid, null, problems, null);
+        new(ConfigurationImportStatus.Invalid, null, null, null, problems, null);
+
+    internal static ConfigurationImportResult Conflicted(ConfigurationWriteConflict conflict) =>
+        new(ConfigurationImportStatus.Conflict, null, null, conflict, null, null);
 
     internal static ConfigurationImportResult StorageFailure(
         IEnumerable<ConfigurationStorageProblem> problems) =>
-        new(ConfigurationImportStatus.StorageFailure, null, null, problems);
+        new(ConfigurationImportStatus.StorageFailure, null, null, null, null, problems);
 }

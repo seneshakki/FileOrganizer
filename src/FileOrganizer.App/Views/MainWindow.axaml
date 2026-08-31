@@ -115,6 +115,7 @@
                         <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Top">
                           <Button Content="Pause" Command="{Binding PauseCommand}" />
                           <Button Content="Resume" Command="{Binding ResumeCommand}" />
+                          <Button Content="Reconnect watcher" Command="{Binding ReconnectCommand}" />
                           <Button Content="Retry baseline" Command="{Binding RetryCommand}" />
                         </StackPanel>
                       </Grid>

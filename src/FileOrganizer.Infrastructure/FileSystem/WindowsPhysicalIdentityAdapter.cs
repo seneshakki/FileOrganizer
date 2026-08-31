@@ -72,8 +72,51 @@ public sealed class WindowsPhysicalIdentityAdapter
                 PhysicalEntryObservationReason.InvalidPath);
         }
 
+        return ObserveWindowsPath(path.Value, cancellationToken);
+    }
+
+    /// <summary>
+    /// Observes a caller-validated absolute Windows path while preserving extended-path spelling.
+    /// </summary>
+    internal PhysicalEntryObservation ObserveAbsolutePath(
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!_isWindows)
+        {
+            return PhysicalEntryObservation.Unsupported(
+                PhysicalEntryObservationReason.UnsupportedCapability);
+        }
+
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path)
+                || path.Contains('\0')
+                || !Path.IsPathFullyQualified(path))
+            {
+                return PhysicalEntryObservation.Unsupported(
+                    PhysicalEntryObservationReason.InvalidPath);
+            }
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException
+                or NotSupportedException
+                or PathTooLongException)
+        {
+            return PhysicalEntryObservation.Unsupported(
+                PhysicalEntryObservationReason.InvalidPath);
+        }
+
+        return ObserveWindowsPath(path, cancellationToken);
+    }
+
+    private static PhysicalEntryObservation ObserveWindowsPath(
+        string path,
+        CancellationToken cancellationToken)
+    {
         using SafeFileHandle handle = CreateFile(
-            path.Value,
+            path,
             FileReadAttributes,
             ShareAll,
             0,

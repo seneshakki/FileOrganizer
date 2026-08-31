@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.ExceptionServices;
 using FileOrganizer.App.Services;
 using FileOrganizer.App.Startup;
@@ -14,6 +15,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     private readonly object _gate = new();
     private readonly IWatchPreviewRuntimeFactory _runtimeFactory;
     private readonly IUiDispatcher _dispatcher;
+    private readonly IUnsavedChangesPrompt _unsavedChangesPrompt;
     private readonly List<IWatchPreviewRuntime> _cleanupPending = [];
     private ReadOnlyCollection<WatchRootViewModel> _roots =
         Array.AsReadOnly(Array.Empty<WatchRootViewModel>());
@@ -27,16 +29,19 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         OrganizationConfigurationService configurationService,
         IWatchPreviewRuntimeFactory runtimeFactory,
         IUiDispatcher dispatcher,
-        IConfigurationPathPicker pathPicker)
+        IConfigurationPathPicker pathPicker,
+        IUnsavedChangesPrompt unsavedChangesPrompt)
     {
         ArgumentNullException.ThrowIfNull(arguments);
         ArgumentNullException.ThrowIfNull(configurationService);
         ArgumentNullException.ThrowIfNull(runtimeFactory);
         ArgumentNullException.ThrowIfNull(dispatcher);
         ArgumentNullException.ThrowIfNull(pathPicker);
+        ArgumentNullException.ThrowIfNull(unsavedChangesPrompt);
 
         _runtimeFactory = runtimeFactory;
         _dispatcher = dispatcher;
+        _unsavedChangesPrompt = unsavedChangesPrompt;
         Editor = new ConfigurationEditorViewModel(
             arguments,
             configurationService,
@@ -70,6 +75,33 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
 
     public Task InitializeAsync() => Editor.InitializeAsync();
 
+    /// <summary>
+    /// Resolves a close request without disposing the workspace. A dirty draft fails closed
+    /// unless the user explicitly discards it or a requested save clears the dirty state.
+    /// </summary>
+    public async Task<bool> RequestCloseAsync(CancellationToken cancellationToken = default)
+    {
+        if (!Editor.IsDirty)
+        {
+            return true;
+        }
+
+        UnsavedChangesDecision decision = await _unsavedChangesPrompt.PromptAsync(
+            Editor.ConfigurationPath,
+            cancellationToken);
+        switch (decision)
+        {
+            case UnsavedChangesDecision.Save:
+                await Editor.SaveAsync(cancellationToken);
+                return !Editor.IsDirty;
+            case UnsavedChangesDecision.Discard:
+                return true;
+            case UnsavedChangesDecision.Cancel:
+            default:
+                return false;
+        }
+    }
+
     public ValueTask DisposeAsync()
     {
         Task disposal;
@@ -87,87 +119,113 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        IWatchPreviewRuntime? previous;
-        lock (_gate)
-        {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            previous = _runtime;
-            _runtime = null;
-            _lastAppliedRevision = -1;
-        }
-
-        if (previous is not null)
-        {
-            previous.SnapshotChanged -= OnSnapshotChanged;
-        }
-
-        ClearRoots();
-        if (previous is not null)
-        {
-            try
-            {
-                await previous.DisposeAsync();
-            }
-            catch
-            {
-                TrackCleanupFailure(previous);
-                throw;
-            }
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
-        IWatchPreviewRuntime runtime = _runtimeFactory.Create(configuration)
-            ?? throw new InvalidOperationException("The preview runtime factory returned null.");
-        runtime.SnapshotChanged += OnSnapshotChanged;
-        bool disposeImmediately;
-        lock (_gate)
-        {
-            disposeImmediately = _disposed;
-            if (disposeImmediately)
-            {
-                runtime.SnapshotChanged -= OnSnapshotChanged;
-            }
-            else
-            {
-                _runtime = runtime;
-            }
-        }
-
-        if (disposeImmediately)
-        {
-            await runtime.DisposeAsync();
-        }
-
-        ObjectDisposedException.ThrowIf(disposeImmediately, this);
-
+        IWatchPreviewRuntime? runtime = null;
+        bool committed = false;
         try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            runtime.Start();
-            ApplySnapshot(runtime, runtime.Snapshot);
-        }
-        catch (Exception startFailure)
-        {
-            runtime.SnapshotChanged -= OnSnapshotChanged;
             lock (_gate)
             {
-                if (ReferenceEquals(_runtime, runtime))
+                ObjectDisposedException.ThrowIf(_disposed, this);
+            }
+
+            runtime = _runtimeFactory.Create(configuration)
+                ?? throw new InvalidOperationException("The preview runtime factory returned null.");
+            runtime.SnapshotChanged += OnSnapshotChanged;
+            cancellationToken.ThrowIfCancellationRequested();
+            runtime.Start();
+            cancellationToken.ThrowIfCancellationRequested();
+
+            WatchPreviewRuntimeSnapshot snapshot = runtime.Snapshot;
+            ReadOnlyCollection<WatchRootViewModel> roots = ProjectRoots(snapshot);
+            IWatchPreviewRuntime? previous = null;
+            bool disposed;
+            bool cancellationRequested;
+            lock (_gate)
+            {
+                disposed = _disposed;
+                cancellationRequested = cancellationToken.IsCancellationRequested;
+                if (!disposed && !cancellationRequested)
                 {
-                    _runtime = null;
+                    previous = _runtime;
+                    _runtime = runtime;
+                    _lastAppliedRevision = snapshot.Revision;
+                    _roots = roots;
+                    committed = true;
                 }
             }
 
-            try
+            if (cancellationRequested)
             {
-                await runtime.DisposeAsync();
-            }
-            catch (Exception cleanupFailure)
-            {
-                TrackCleanupFailure(runtime);
-                throw new AggregateException(startFailure, cleanupFailure);
+                cancellationToken.ThrowIfCancellationRequested();
             }
 
-            ExceptionDispatchInfo.Capture(startFailure).Throw();
+            ObjectDisposedException.ThrowIf(disposed, this);
+
+            if (previous is not null)
+            {
+                previous.SnapshotChanged -= OnSnapshotChanged;
+            }
+
+            Exception? transitionWarning = null;
+            try
+            {
+                RaiseRootsChanged();
+            }
+            catch (Exception exception)
+            {
+                transitionWarning = exception;
+            }
+
+            try
+            {
+                ApplySnapshot(runtime, runtime.Snapshot);
+            }
+            catch (Exception exception)
+            {
+                transitionWarning = transitionWarning is null
+                    ? exception
+                    : new AggregateException(transitionWarning, exception);
+            }
+
+            if (previous is not null)
+            {
+                try
+                {
+                    await previous.DisposeAsync();
+                }
+                catch (Exception cleanupFailure)
+                {
+                    TrackCleanupFailure(previous);
+                    transitionWarning = transitionWarning is null
+                        ? cleanupFailure
+                        : new AggregateException(transitionWarning, cleanupFailure);
+                }
+            }
+
+            if (transitionWarning is not null)
+            {
+                TraceErrorSafely(
+                    "Preview runtime replacement committed with a post-commit warning: {0}",
+                    transitionWarning);
+            }
+        }
+        catch (Exception activationFailure) when (!committed)
+        {
+            if (runtime is not null)
+            {
+                runtime.SnapshotChanged -= OnSnapshotChanged;
+                try
+                {
+                    await runtime.DisposeAsync();
+                }
+                catch (Exception cleanupFailure)
+                {
+                    TrackCleanupFailure(runtime);
+                    throw new AggregateException(activationFailure, cleanupFailure);
+                }
+            }
+
+            ExceptionDispatchInfo.Capture(activationFailure).Throw();
         }
     }
 
@@ -180,6 +238,18 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
 
         _dispatcher.Post(
             () => ApplySnapshot(runtime, notification.Snapshot));
+    }
+
+    private static void TraceErrorSafely(string message, Exception exception)
+    {
+        try
+        {
+            Trace.TraceError(message, exception);
+        }
+        catch (Exception)
+        {
+            // Diagnostics must not invalidate an already committed runtime replacement.
+        }
     }
 
     private void TrackCleanupFailure(IWatchPreviewRuntime runtime)
@@ -199,14 +269,7 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(runtime);
         ArgumentNullException.ThrowIfNull(snapshot);
-        ReadOnlyCollection<WatchRootViewModel> roots = Array.AsReadOnly(
-            snapshot.Roots.Select(
-                root => new WatchRootViewModel(
-                    root,
-                    PauseRoot,
-                    ResumeRoot,
-                    RetryBaseline))
-                .ToArray());
+        ReadOnlyCollection<WatchRootViewModel> roots = ProjectRoots(snapshot);
         lock (_gate)
         {
             if (_disposed
@@ -223,20 +286,17 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         RaiseRootsChanged();
     }
 
-    private void ClearRoots()
-    {
-        bool changed;
-        lock (_gate)
-        {
-            changed = _roots.Count != 0;
-            _roots = Array.AsReadOnly(Array.Empty<WatchRootViewModel>());
-        }
-
-        if (changed)
-        {
-            RaiseRootsChanged();
-        }
-    }
+    private ReadOnlyCollection<WatchRootViewModel> ProjectRoots(
+        WatchPreviewRuntimeSnapshot snapshot) =>
+        Array.AsReadOnly(
+            snapshot.Roots.Select(
+                root => new WatchRootViewModel(
+                    root,
+                    PauseRoot,
+                    ResumeRoot,
+                    ReconnectRoot,
+                    RetryBaseline))
+                .ToArray());
 
     private void RaiseRootsChanged()
     {
@@ -252,6 +312,10 @@ public sealed class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     private bool ResumeRoot(Guid watchRootId) => InvokeRuntimeCommand(
         watchRootId,
         static (runtime, id) => runtime.ResumeRoot(id));
+
+    private bool ReconnectRoot(Guid watchRootId) => InvokeRuntimeCommand(
+        watchRootId,
+        static (runtime, id) => runtime.ReconnectRoot(id));
 
     private bool RetryBaseline(Guid watchRootId) => InvokeRuntimeCommand(
         watchRootId,

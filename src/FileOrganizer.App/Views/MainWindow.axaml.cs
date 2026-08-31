@@ -23,8 +23,7 @@ public partial class MainWindow : Window
             if (!_shutdownStarted)
             {
                 _shutdownStarted = true;
-                IsEnabled = false;
-                _ = DisposeAndCloseAsync(disposable);
+                _ = ConfirmDisposeAndCloseAsync(disposable);
             }
         }
 
@@ -45,25 +44,58 @@ public partial class MainWindow : Window
             }
             catch (Exception exception)
             {
-                Trace.TraceError("FileOrganizer initialization failed: {0}", exception);
+                TraceErrorSafely("FileOrganizer initialization failed: {0}", exception);
             }
         }
     }
 
-    private async Task DisposeAndCloseAsync(IAsyncDisposable disposable)
+    private async Task ConfirmDisposeAndCloseAsync(IAsyncDisposable disposable)
     {
+        if (disposable is MainWindowViewModel viewModel)
+        {
+            bool closeApproved;
+            try
+            {
+                closeApproved = await viewModel.RequestCloseAsync();
+            }
+            catch (Exception exception)
+            {
+                TraceErrorSafely("FileOrganizer close confirmation failed: {0}", exception);
+                closeApproved = false;
+            }
+
+            if (!closeApproved)
+            {
+                _shutdownStarted = false;
+                return;
+            }
+        }
+
+        IsEnabled = false;
         try
         {
             await disposable.DisposeAsync();
         }
         catch (Exception exception)
         {
-            Trace.TraceError("FileOrganizer shutdown failed: {0}", exception);
+            TraceErrorSafely("FileOrganizer shutdown failed: {0}", exception);
         }
         finally
         {
             _shutdownComplete = true;
             Close();
+        }
+    }
+
+    private static void TraceErrorSafely(string message, Exception exception)
+    {
+        try
+        {
+            Trace.TraceError(message, exception);
+        }
+        catch (Exception)
+        {
+            // A diagnostic listener cannot be allowed to strand the close state machine.
         }
     }
 }

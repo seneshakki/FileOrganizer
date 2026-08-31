@@ -4,5 +4,6 @@ public enum ConfigurationSaveStatus
 {
     Saved,
     Invalid,
+    Conflict,
     StorageFailure,
 }

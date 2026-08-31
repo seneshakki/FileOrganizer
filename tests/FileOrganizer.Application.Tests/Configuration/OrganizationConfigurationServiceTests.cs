@@ -1,3 +1,4 @@
+using System.Text;
 using FileOrganizer.Application.Configuration;
 using FileOrganizer.Core.Actions;
 using FileOrganizer.Core.Matching.Conditions;
@@ -20,11 +21,13 @@ public sealed class OrganizationConfigurationServiceTests
         ConfigurationSaveResult save = await service.SaveAsync(
             "active.json",
             configuration,
+            ConfigurationWritePrecondition.MustBeMissing,
             cancellationToken);
         ConfigurationLoadResult load = await service.LoadAsync("active.json", cancellationToken);
         ConfigurationSaveResult export = await service.ExportAsync(
             "export.json",
             configuration,
+            [],
             cancellationToken);
 
         Assert.Equal(ConfigurationSaveStatus.Saved, save.Status);
@@ -32,6 +35,7 @@ public sealed class OrganizationConfigurationServiceTests
         Assert.Equal(ConfigurationSaveStatus.Saved, export.Status);
         Assert.NotNull(load.Configuration);
         Assert.Equal(store.Files["active.json"], load.SourceText);
+        Assert.NotNull(load.Revision);
         Assert.Equal(2, store.WriteCount);
         Assert.True(store.Files.ContainsKey("export.json"));
     }
@@ -52,6 +56,7 @@ public sealed class OrganizationConfigurationServiceTests
         Assert.Equal(ConfigurationLoadStatus.Loaded, load.Status);
         Assert.NotNull(load.Configuration);
         Assert.Equal(sourceText, load.SourceText);
+        Assert.Equal(Revision(sourceText), load.Revision);
         Assert.Empty(load.ConfigurationProblems);
     }
 
@@ -70,6 +75,7 @@ public sealed class OrganizationConfigurationServiceTests
         Assert.Equal(ConfigurationLoadStatus.Invalid, load.Status);
         Assert.Null(load.Configuration);
         Assert.Equal(malformed, load.SourceText);
+        Assert.Equal(Revision(malformed), load.Revision);
         Assert.Contains(
             load.ConfigurationProblems,
             static problem => problem.Kind == ConfigurationProblemKind.MalformedJson);
@@ -86,6 +92,7 @@ public sealed class OrganizationConfigurationServiceTests
         ConfigurationImportResult result = await service.ImportAsync(
             "import.json",
             "active.json",
+            ConfigurationWritePrecondition.MustMatch(Revision("previous valid content")),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(ConfigurationImportStatus.Invalid, result.Status);
@@ -108,6 +115,7 @@ public sealed class OrganizationConfigurationServiceTests
         ConfigurationImportResult result = await service.ImportAsync(
             "import.json",
             "active.json",
+            ConfigurationWritePrecondition.MustMatch(Revision("old")),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(ConfigurationImportStatus.Imported, result.Status);
@@ -134,12 +142,53 @@ public sealed class OrganizationConfigurationServiceTests
         ConfigurationSaveResult result = await service.SaveAsync(
             "active.json",
             Configuration(),
+            ConfigurationWritePrecondition.MustBeMissing,
             TestContext.Current.CancellationToken);
 
         Assert.Equal(ConfigurationSaveStatus.StorageFailure, result.Status);
         Assert.Equal(
             ConfigurationStorageProblemKind.PublicationFailure,
             Assert.Single(result.StorageProblems).Kind);
+    }
+
+    [Fact]
+    public async Task ConditionalWriteConflictsRemainStructured()
+    {
+        ScriptedTextStore store = new()
+        {
+            WriteResult = ConfigurationTextWriteResult.Conflicted(
+                new ConfigurationWriteConflict(
+                    ConfigurationWriteConflictKind.ChangedExternally,
+                    "The document changed externally.")),
+        };
+        OrganizationConfigurationService service = new(store);
+
+        ConfigurationSaveResult result = await service.SaveAsync(
+            "active.json",
+            Configuration(),
+            ConfigurationWritePrecondition.MustMatch(Revision("loaded")),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ConfigurationSaveStatus.Conflict, result.Status);
+        Assert.Equal(ConfigurationWriteConflictKind.ChangedExternally, result.Conflict!.Kind);
+        Assert.Empty(result.ConfigurationProblems);
+        Assert.Empty(result.StorageProblems);
+    }
+
+    [Fact]
+    public void WriteRequestSnapshotsProtectedPaths()
+    {
+        List<string> protectedPaths = ["active.json"];
+        ConfigurationTextWriteRequest request = new(
+            "export.json",
+            "{}",
+            ConfigurationWritePrecondition.Unconditional,
+            protectedPaths);
+
+        protectedPaths[0] = "mutated.json";
+        protectedPaths.Add("added.json");
+
+        Assert.Equal(["active.json"], request.ProtectedPaths);
     }
 
     [Fact]
@@ -168,14 +217,16 @@ public sealed class OrganizationConfigurationServiceTests
                         new MoveToDirectoryAction(@"C:\Target"))),
             ]);
 
+    private static ConfigurationDocumentRevision Revision(string content) =>
+        ConfigurationDocumentRevision.FromBytes(Encoding.UTF8.GetBytes(content));
+
     private sealed class ScriptedTextStore : IConfigurationTextStore
     {
         internal Dictionary<string, string> Files { get; } = new(StringComparer.Ordinal);
 
         internal int WriteCount { get; private set; }
 
-        internal ConfigurationTextWriteResult WriteResult { get; init; } =
-            ConfigurationTextWriteResult.Succeeded();
+        internal ConfigurationTextWriteResult? WriteResult { get; init; }
 
         public ValueTask<ConfigurationTextReadResult> ReadAsync(
             string path,
@@ -184,23 +235,49 @@ public sealed class OrganizationConfigurationServiceTests
             cancellationToken.ThrowIfCancellationRequested();
             return ValueTask.FromResult(
                 Files.TryGetValue(path, out string? content)
-                    ? ConfigurationTextReadResult.Found(content)
+                    ? ConfigurationTextReadResult.Found(content, Revision(content))
                     : ConfigurationTextReadResult.NotFound());
         }
 
         public ValueTask<ConfigurationTextWriteResult> WriteAsync(
-            string path,
-            string content,
+            ConfigurationTextWriteRequest request,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             WriteCount++;
-            if (WriteResult.Status == ConfigurationTextWriteStatus.Succeeded)
+            ConfigurationTextWriteResult result = WriteResult ??
+                EvaluateWrite(request);
+            if (result.Status == ConfigurationTextWriteStatus.Succeeded)
             {
-                Files[path] = content;
+                Files[request.Path] = request.Content;
             }
 
-            return ValueTask.FromResult(WriteResult);
+            return ValueTask.FromResult(result);
         }
+
+        private ConfigurationTextWriteResult EvaluateWrite(
+            ConfigurationTextWriteRequest request)
+        {
+            bool exists = Files.TryGetValue(request.Path, out string? current);
+            if (request.Precondition.Kind == ConfigurationWritePreconditionKind.MustBeMissing
+                && exists)
+            {
+                return Conflict(ConfigurationWriteConflictKind.TargetAlreadyExists);
+            }
+
+            if (request.Precondition.Kind
+                    == ConfigurationWritePreconditionKind.MustMatchRevision
+                && (!exists || Revision(current!) != request.Precondition.ExpectedRevision))
+            {
+                return Conflict(ConfigurationWriteConflictKind.ChangedExternally);
+            }
+
+            return ConfigurationTextWriteResult.Succeeded(Revision(request.Content));
+        }
+
+        private static ConfigurationTextWriteResult Conflict(
+            ConfigurationWriteConflictKind kind) =>
+            ConfigurationTextWriteResult.Conflicted(
+                new ConfigurationWriteConflict(kind, "Injected conflict."));
     }
 }

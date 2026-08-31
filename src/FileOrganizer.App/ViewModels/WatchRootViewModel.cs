@@ -12,11 +12,13 @@ public sealed class WatchRootViewModel
         WatchPreviewRootSnapshot snapshot,
         Func<Guid, bool> pause,
         Func<Guid, bool> resume,
+        Func<Guid, bool> reconnect,
         Func<Guid, bool> retry)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         ArgumentNullException.ThrowIfNull(pause);
         ArgumentNullException.ThrowIfNull(resume);
+        ArgumentNullException.ThrowIfNull(reconnect);
         ArgumentNullException.ThrowIfNull(retry);
 
         Id = snapshot.WatchRootId;
@@ -57,6 +59,11 @@ public sealed class WatchRootViewModel
         ResumeCommand = new DelegateCommand(
             () => resume(Id),
             () => IsEnabled && snapshot.State == WatchRootState.Paused);
+        ReconnectCommand = new DelegateCommand(
+            () => reconnect(Id),
+            () => IsEnabled
+                && snapshot.State is WatchRootState.Faulted
+                    or WatchRootState.Unavailable);
         RetryCommand = new DelegateCommand(
             () => retry(Id),
             () => IsEnabled
@@ -105,6 +112,8 @@ public sealed class WatchRootViewModel
     public DelegateCommand PauseCommand { get; }
 
     public DelegateCommand ResumeCommand { get; }
+
+    public DelegateCommand ReconnectCommand { get; }
 
     public DelegateCommand RetryCommand { get; }
 

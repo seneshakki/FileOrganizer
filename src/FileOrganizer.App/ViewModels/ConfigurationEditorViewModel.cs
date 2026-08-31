@@ -29,10 +29,15 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
     private ConfigurationLoadState _persistedState = ConfigurationLoadState.AwaitingPath;
     private string _status = "Choose or create a configuration file to begin.";
     private string _persistedStatus = "Choose or create a configuration file to begin.";
+    private string? _runtimeFailureStatus;
+    private ReadOnlyCollection<string>? _runtimeFailureProblems;
+    private string? _documentConflictStatus;
+    private ReadOnlyCollection<string>? _documentConflictProblems;
     private string? _documentPath;
     private string? _activeConfigurationPath;
     private string _documentText = string.Empty;
     private string? _persistedText;
+    private ConfigurationDocumentRevision? _persistedRevision;
     private bool _hasDocument;
     private bool _isDirty;
     private bool _isBusy;
@@ -265,7 +270,11 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
         }
 
         OrganizationConfiguration configuration = CreateEmptyWindowsConfiguration();
-        await SaveAndActivateAsync(path, configuration, cancellationToken);
+        await SaveAndActivateAsync(
+            path,
+            configuration,
+            ConfigurationWritePrecondition.MustBeMissing,
+            cancellationToken);
     }
 
     private async Task ReloadCoreAsync(CancellationToken cancellationToken)
@@ -293,11 +302,14 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
         }
 
         SetPresentation(
-            _isDirty ? ConfigurationLoadState.Editing : _persistedState,
-            _isDirty
-                ? "The draft is valid and has not been saved."
-                : "The saved configuration is valid.",
+            ConfigurationLoadState.Editing,
+            "The draft is valid and has not been saved.",
             []);
+        if (!_isDirty)
+        {
+            RestoreStablePresentation();
+        }
+
         return Task.CompletedTask;
     }
 
@@ -319,7 +331,13 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
             return;
         }
 
-        await SaveAndActivateAsync(_documentPath, decoded.Configuration!, cancellationToken);
+        await SaveAndActivateAsync(
+            _documentPath,
+            decoded.Configuration!,
+            _persistedRevision is null
+                ? ConfigurationWritePrecondition.MustBeMissing
+                : ConfigurationWritePrecondition.MustMatch(_persistedRevision),
+            cancellationToken);
     }
 
     private async Task ImportCoreAsync(CancellationToken cancellationToken)
@@ -346,6 +364,9 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
         ConfigurationImportResult import = await _configurationService.ImportAsync(
             sourcePath,
             activePath,
+            _persistedRevision is null
+                ? ConfigurationWritePrecondition.MustBeMissing
+                : ConfigurationWritePrecondition.MustMatch(_persistedRevision),
             cancellationToken);
         switch (import.Status)
         {
@@ -360,6 +381,11 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
                     ConfigurationLoadState.Invalid,
                     "The import is invalid; the active configuration was not changed.",
                     import.ConfigurationProblems);
+                return;
+            case ConfigurationImportStatus.Conflict:
+                SetDocumentConflict(
+                    "The active configuration changed externally; the import was not published.",
+                    import.Conflict!);
                 return;
             case ConfigurationImportStatus.StorageFailure:
                 SetStorageProblems(
@@ -381,6 +407,7 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
                 SetDocument(
                     activePath,
                     encoded.Json!,
+                    import.Revision!,
                     ConfigurationLoadState.Loaded,
                     "Configuration imported and saved.",
                     []);
@@ -433,6 +460,12 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
         ConfigurationSaveResult export = await _configurationService.ExportAsync(
             destinationPath,
             decoded.Configuration!,
+            new[] { _documentPath, _activeConfigurationPath }
+                .Where(static path => path is not null)
+                .Select(static path => path!)
+                .Distinct(OperatingSystem.IsWindows()
+                    ? StringComparer.OrdinalIgnoreCase
+                    : StringComparer.Ordinal),
             cancellationToken);
         if (export.Status == ConfigurationSaveStatus.Invalid)
         {
@@ -451,10 +484,35 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
             return;
         }
 
-        SetPresentation(
-            _isDirty ? ConfigurationLoadState.Editing : _persistedState,
-            $"Configuration exported to {destinationPath}. The active configuration was not changed.",
-            []);
+        if (export.Status == ConfigurationSaveStatus.Conflict)
+        {
+            SetConflict(
+                "The export destination conflicts with the current or active configuration; nothing was exported.",
+                export.Conflict!);
+            return;
+        }
+
+        if (_documentConflictStatus is not null && _documentConflictProblems is not null)
+        {
+            SetPresentation(
+                ConfigurationLoadState.Conflict,
+                $"Configuration exported to {destinationPath}. {_documentConflictStatus}",
+                _documentConflictProblems);
+        }
+        else if (_runtimeFailureStatus is not null && _runtimeFailureProblems is not null)
+        {
+            SetPresentation(
+                ConfigurationLoadState.RuntimeFailure,
+                $"Configuration exported to {destinationPath}. {_runtimeFailureStatus}",
+                _runtimeFailureProblems);
+        }
+        else
+        {
+            SetPresentation(
+                _isDirty ? ConfigurationLoadState.Editing : _persistedState,
+                $"Configuration exported to {destinationPath}. The active configuration was not changed.",
+                []);
+        }
     }
 
     private Task RevertCoreAsync(CancellationToken cancellationToken)
@@ -467,12 +525,8 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
 
         _documentText = _persistedText;
         _isDirty = false;
-        _loadState = _persistedState;
-        _status = _persistedStatus;
-        _problems = _persistedProblems;
+        RestoreStablePresentation();
         RaiseDocumentProperties();
-        RaisePresentationProperties();
-        NotifyCommandStates();
         return Task.CompletedTask;
     }
 
@@ -489,6 +543,7 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
                 SetDocument(
                     path,
                     string.Empty,
+                    null,
                     ConfigurationLoadState.Missing,
                     "Configuration file was not found. Nothing was created.",
                     ["Use Create to publish an empty schema-v1 configuration at this path."],
@@ -498,6 +553,7 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
                 SetDocument(
                     path,
                     load.SourceText!,
+                    load.Revision!,
                     ConfigurationLoadState.Invalid,
                     "Configuration is invalid; the active preview was not changed.",
                     FormatConfigurationProblems(load.ConfigurationProblems));
@@ -513,6 +569,7 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
                 SetDocument(
                     path,
                     load.SourceText!,
+                    load.Revision!,
                     ConfigurationLoadState.Loaded,
                     "Configuration loaded and validated.",
                     []);
@@ -532,6 +589,7 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
     private async Task SaveAndActivateAsync(
         string path,
         OrganizationConfiguration configuration,
+        ConfigurationWritePrecondition precondition,
         CancellationToken cancellationToken)
     {
         SetPresentation(
@@ -541,6 +599,7 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
         ConfigurationSaveResult save = await _configurationService.SaveAsync(
             path,
             configuration,
+            precondition,
             cancellationToken);
         if (save.Status == ConfigurationSaveStatus.Invalid)
         {
@@ -559,6 +618,16 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
             return;
         }
 
+        if (save.Status == ConfigurationSaveStatus.Conflict)
+        {
+            SetDocumentConflict(
+                precondition.Kind == ConfigurationWritePreconditionKind.MustBeMissing
+                    ? "The configuration destination now exists; nothing was replaced or activated."
+                    : "The configuration changed externally; the draft was not published or activated.",
+                save.Conflict!);
+            return;
+        }
+
         ConfigurationEncodeResult encoded = OrganizationConfigurationJsonCodec.Encode(configuration);
         if (!encoded.Succeeded)
         {
@@ -569,6 +638,7 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
         SetDocument(
             path,
             encoded.Json!,
+            save.Revision!,
             ConfigurationLoadState.Loaded,
             "Configuration saved.",
             []);
@@ -597,15 +667,16 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
         }
         catch (Exception exception)
         {
-            _activeConfigurationPath = null;
-            RaisePropertyChanged(nameof(ActiveConfigurationPath));
-            SetProblems(
-                ConfigurationLoadState.RuntimeFailure,
+            SetRuntimeFailure(
                 "The configuration is valid and persisted, but the preview runtime could not be activated.",
                 [exception.Message]);
             return;
         }
 
+        _runtimeFailureStatus = null;
+        _runtimeFailureProblems = null;
+        _documentConflictStatus = null;
+        _documentConflictProblems = null;
         _activeConfigurationPath = path;
         RaisePropertyChanged(nameof(ActiveConfigurationPath));
         SetPresentation(ConfigurationLoadState.Loaded, successStatus, []);
@@ -705,28 +776,42 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
         }
         else
         {
-            _loadState = _persistedState;
-            _status = _persistedStatus;
-            _problems = _persistedProblems;
+            RestoreStablePresentation();
         }
 
         RaiseDocumentProperties();
-        RaisePresentationProperties();
-        NotifyCommandStates();
+        if (_isDirty)
+        {
+            RaisePresentationProperties();
+            NotifyCommandStates();
+        }
     }
 
     private void SetDocument(
         string path,
         string text,
+        ConfigurationDocumentRevision? revision,
         ConfigurationLoadState persistedState,
         string persistedStatus,
         IEnumerable<string> persistedProblems,
         bool hasDocument = true)
     {
+        if (hasDocument != (revision is not null))
+        {
+            throw new ArgumentException(
+                "An existing configuration document requires a storage revision.",
+                nameof(revision));
+        }
+
         string[] problemSnapshot = [.. persistedProblems];
         _documentPath = path;
         _documentText = text;
         _persistedText = hasDocument ? text : null;
+        _persistedRevision = revision;
+        _runtimeFailureStatus = null;
+        _runtimeFailureProblems = null;
+        _documentConflictStatus = null;
+        _documentConflictProblems = null;
         _hasDocument = hasDocument;
         _isDirty = false;
         _persistedState = persistedState;
@@ -753,6 +838,61 @@ public sealed class ConfigurationEditorViewModel : ViewModelBase, IAsyncDisposab
             ConfigurationLoadState.StorageFailure,
             status,
             problems.Select(static problem => $"{problem.Kind}: {problem.Description}"));
+
+    private void SetConflict(string status, ConfigurationWriteConflict conflict)
+    {
+        ArgumentNullException.ThrowIfNull(conflict);
+        SetProblems(
+            ConfigurationLoadState.Conflict,
+            status,
+            [$"{conflict.Kind}: {conflict.Description}"]);
+    }
+
+    private void SetDocumentConflict(string status, ConfigurationWriteConflict conflict)
+    {
+        ArgumentNullException.ThrowIfNull(conflict);
+        _documentConflictStatus = status;
+        _documentConflictProblems = Array.AsReadOnly(
+            new[] { $"{conflict.Kind}: {conflict.Description}" });
+        SetPresentation(
+            ConfigurationLoadState.Conflict,
+            _documentConflictStatus,
+            _documentConflictProblems);
+    }
+
+    private void SetRuntimeFailure(string status, IEnumerable<string> problems)
+    {
+        string[] snapshot = [.. problems];
+        _runtimeFailureStatus = status;
+        _runtimeFailureProblems = Array.AsReadOnly(
+            snapshot.Length == 0 ? ["An unspecified runtime problem occurred."] : snapshot);
+        RestoreStablePresentation();
+    }
+
+    private void RestoreStablePresentation()
+    {
+        if (_documentConflictStatus is not null && _documentConflictProblems is not null)
+        {
+            _loadState = ConfigurationLoadState.Conflict;
+            _status = _documentConflictStatus;
+            _problems = _documentConflictProblems;
+        }
+        else if (_runtimeFailureStatus is not null && _runtimeFailureProblems is not null)
+        {
+            _loadState = ConfigurationLoadState.RuntimeFailure;
+            _status = _runtimeFailureStatus;
+            _problems = _runtimeFailureProblems;
+        }
+        else
+        {
+            _loadState = _persistedState;
+            _status = _persistedStatus;
+            _problems = _persistedProblems;
+        }
+
+        RaisePresentationProperties();
+        NotifyCommandStates();
+    }
 
     private void SetProblems(
         ConfigurationLoadState state,

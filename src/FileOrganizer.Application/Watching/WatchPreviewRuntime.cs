@@ -152,6 +152,26 @@ public sealed class WatchPreviewRuntime : IWatchPreviewRuntime
     public bool ResumeRoot(Guid watchRootId) =>
         InvokeRootCommand(watchRootId, static root => root.Monitor.Resume());
 
+    /// <summary>
+    /// Reopens one enabled failed source. Incremental events remain untrusted until a fresh
+    /// full-root baseline succeeds.
+    /// </summary>
+    public bool ReconnectRoot(Guid watchRootId) =>
+        InvokeRootCommand(
+            watchRootId,
+            static root =>
+            {
+                if (!root.Configuration.IsEnabled
+                    || root.Monitor.State is not (WatchRootState.Faulted
+                        or WatchRootState.Unavailable))
+                {
+                    return false;
+                }
+
+                root.Monitor.Pause();
+                return root.Monitor.Resume();
+            });
+
     /// <summary>Explicitly retries a full baseline for one root awaiting synchronization.</summary>
     public bool RequestBaselineScan(Guid watchRootId) =>
         InvokeRootCommand(

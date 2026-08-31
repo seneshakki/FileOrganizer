@@ -21,12 +21,14 @@ public partial class App : Avalonia.Application
             var configurationService = new OrganizationConfigurationService(
                 new FileConfigurationTextStore());
             var mainWindow = new MainWindow();
+            var unsavedChangesPrompt = new AvaloniaUnsavedChangesPrompt(mainWindow);
             var viewModel = new MainWindowViewModel(
                 ConfigurationPathArguments.Parse(desktop.Args ?? []),
                 configurationService,
                 new WindowsWatchPreviewRuntimeFactory(),
                 new AvaloniaUiDispatcher(),
-                new AvaloniaConfigurationPathPicker(mainWindow));
+                new AvaloniaConfigurationPathPicker(mainWindow),
+                unsavedChangesPrompt);
             mainWindow.DataContext = viewModel;
             desktop.MainWindow = mainWindow;
         }

@@ -12,6 +12,7 @@ public sealed class ConfigurationLoadResult
         ConfigurationLoadStatus status,
         OrganizationConfiguration? configuration,
         string? sourceText,
+        ConfigurationDocumentRevision? revision,
         IEnumerable<ConfigurationProblem>? configurationProblems,
         IEnumerable<ConfigurationStorageProblem>? storageProblems)
     {
@@ -22,21 +23,25 @@ public sealed class ConfigurationLoadResult
             ConfigurationLoadStatus.Loaded =>
                 configuration is not null
                 && sourceText is not null
+                && revision is not null
                 && configurationSnapshot.Length == 0
                 && storageSnapshot.Length == 0,
             ConfigurationLoadStatus.NotFound =>
                 configuration is null
                 && sourceText is null
+                && revision is null
                 && configurationSnapshot.Length == 0
                 && storageSnapshot.Length == 0,
             ConfigurationLoadStatus.Invalid =>
                 configuration is null
                 && sourceText is not null
+                && revision is not null
                 && configurationSnapshot.Length != 0
                 && storageSnapshot.Length == 0,
             ConfigurationLoadStatus.StorageFailure =>
                 configuration is null
                 && sourceText is null
+                && revision is null
                 && configurationSnapshot.Length == 0
                 && storageSnapshot.Length != 0,
             _ => false,
@@ -49,6 +54,7 @@ public sealed class ConfigurationLoadResult
         Status = status;
         Configuration = configuration;
         SourceText = sourceText;
+        Revision = revision;
         _configurationProblems = Array.AsReadOnly(configurationSnapshot);
         _storageProblems = Array.AsReadOnly(storageSnapshot);
     }
@@ -60,24 +66,34 @@ public sealed class ConfigurationLoadResult
     /// <summary>Gets the exact text read from storage when a document was found.</summary>
     public string? SourceText { get; }
 
+    public ConfigurationDocumentRevision? Revision { get; }
+
     public IReadOnlyList<ConfigurationProblem> ConfigurationProblems => _configurationProblems;
 
     public IReadOnlyList<ConfigurationStorageProblem> StorageProblems => _storageProblems;
 
     internal static ConfigurationLoadResult Loaded(
         OrganizationConfiguration configuration,
-        string sourceText) =>
-        new(ConfigurationLoadStatus.Loaded, configuration, sourceText, null, null);
+        string sourceText,
+        ConfigurationDocumentRevision revision) =>
+        new(
+            ConfigurationLoadStatus.Loaded,
+            configuration,
+            sourceText,
+            revision,
+            null,
+            null);
 
     internal static ConfigurationLoadResult NotFound() =>
-        new(ConfigurationLoadStatus.NotFound, null, null, null, null);
+        new(ConfigurationLoadStatus.NotFound, null, null, null, null, null);
 
     internal static ConfigurationLoadResult Invalid(
         IEnumerable<ConfigurationProblem> problems,
-        string sourceText) =>
-        new(ConfigurationLoadStatus.Invalid, null, sourceText, problems, null);
+        string sourceText,
+        ConfigurationDocumentRevision revision) =>
+        new(ConfigurationLoadStatus.Invalid, null, sourceText, revision, problems, null);
 
     internal static ConfigurationLoadResult StorageFailure(
         IEnumerable<ConfigurationStorageProblem> problems) =>
-        new(ConfigurationLoadStatus.StorageFailure, null, null, null, problems);
+        new(ConfigurationLoadStatus.StorageFailure, null, null, null, null, problems);
 }

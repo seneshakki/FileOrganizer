@@ -10,6 +10,8 @@ public sealed class ConfigurationSaveResult
 
     private ConfigurationSaveResult(
         ConfigurationSaveStatus status,
+        ConfigurationDocumentRevision? revision,
+        ConfigurationWriteConflict? conflict,
         IEnumerable<ConfigurationProblem>? configurationProblems,
         IEnumerable<ConfigurationStorageProblem>? storageProblems)
     {
@@ -18,11 +20,25 @@ public sealed class ConfigurationSaveResult
         bool valid = status switch
         {
             ConfigurationSaveStatus.Saved =>
-                configurationSnapshot.Length == 0 && storageSnapshot.Length == 0,
+                revision is not null
+                && conflict is null
+                && configurationSnapshot.Length == 0
+                && storageSnapshot.Length == 0,
             ConfigurationSaveStatus.Invalid =>
-                configurationSnapshot.Length != 0 && storageSnapshot.Length == 0,
+                revision is null
+                && conflict is null
+                && configurationSnapshot.Length != 0
+                && storageSnapshot.Length == 0,
+            ConfigurationSaveStatus.Conflict =>
+                revision is null
+                && conflict is not null
+                && configurationSnapshot.Length == 0
+                && storageSnapshot.Length == 0,
             ConfigurationSaveStatus.StorageFailure =>
-                configurationSnapshot.Length == 0 && storageSnapshot.Length != 0,
+                revision is null
+                && conflict is null
+                && configurationSnapshot.Length == 0
+                && storageSnapshot.Length != 0,
             _ => false,
         };
         if (!valid)
@@ -31,23 +47,32 @@ public sealed class ConfigurationSaveResult
         }
 
         Status = status;
+        Revision = revision;
+        Conflict = conflict;
         _configurationProblems = Array.AsReadOnly(configurationSnapshot);
         _storageProblems = Array.AsReadOnly(storageSnapshot);
     }
 
     public ConfigurationSaveStatus Status { get; }
 
+    public ConfigurationDocumentRevision? Revision { get; }
+
+    public ConfigurationWriteConflict? Conflict { get; }
+
     public IReadOnlyList<ConfigurationProblem> ConfigurationProblems => _configurationProblems;
 
     public IReadOnlyList<ConfigurationStorageProblem> StorageProblems => _storageProblems;
 
-    internal static ConfigurationSaveResult Saved() =>
-        new(ConfigurationSaveStatus.Saved, null, null);
+    internal static ConfigurationSaveResult Saved(ConfigurationDocumentRevision revision) =>
+        new(ConfigurationSaveStatus.Saved, revision, null, null, null);
 
     internal static ConfigurationSaveResult Invalid(IEnumerable<ConfigurationProblem> problems) =>
-        new(ConfigurationSaveStatus.Invalid, problems, null);
+        new(ConfigurationSaveStatus.Invalid, null, null, problems, null);
+
+    internal static ConfigurationSaveResult Conflicted(ConfigurationWriteConflict conflict) =>
+        new(ConfigurationSaveStatus.Conflict, null, conflict, null, null);
 
     internal static ConfigurationSaveResult StorageFailure(
         IEnumerable<ConfigurationStorageProblem> problems) =>
-        new(ConfigurationSaveStatus.StorageFailure, null, problems);
+        new(ConfigurationSaveStatus.StorageFailure, null, null, null, problems);
 }

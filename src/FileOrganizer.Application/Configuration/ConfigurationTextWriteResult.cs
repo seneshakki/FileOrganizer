@@ -9,6 +9,8 @@ public sealed class ConfigurationTextWriteResult
 
     private ConfigurationTextWriteResult(
         ConfigurationTextWriteStatus status,
+        ConfigurationDocumentRevision? revision,
+        ConfigurationWriteConflict? conflict,
         IEnumerable<ConfigurationStorageProblem>? problems)
     {
         ConfigurationStorageProblem[] snapshot = [.. problems ?? []];
@@ -19,8 +21,12 @@ public sealed class ConfigurationTextWriteResult
 
         bool valid = status switch
         {
-            ConfigurationTextWriteStatus.Succeeded => snapshot.Length == 0,
-            ConfigurationTextWriteStatus.Failed => snapshot.Length != 0,
+            ConfigurationTextWriteStatus.Succeeded =>
+                revision is not null && conflict is null && snapshot.Length == 0,
+            ConfigurationTextWriteStatus.Conflict =>
+                revision is null && conflict is not null && snapshot.Length == 0,
+            ConfigurationTextWriteStatus.Failed =>
+                revision is null && conflict is null && snapshot.Length != 0,
             _ => false,
         };
         if (!valid)
@@ -41,17 +47,34 @@ public sealed class ConfigurationTextWriteResult
             });
 
         Status = status;
+        Revision = revision;
+        Conflict = conflict;
         _problems = Array.AsReadOnly(snapshot);
     }
 
     public ConfigurationTextWriteStatus Status { get; }
 
+    public ConfigurationDocumentRevision? Revision { get; }
+
+    public ConfigurationWriteConflict? Conflict { get; }
+
     public IReadOnlyList<ConfigurationStorageProblem> Problems => _problems;
 
-    public static ConfigurationTextWriteResult Succeeded() =>
-        new(ConfigurationTextWriteStatus.Succeeded, null);
+    public static ConfigurationTextWriteResult Succeeded(
+        ConfigurationDocumentRevision revision)
+    {
+        ArgumentNullException.ThrowIfNull(revision);
+        return new(ConfigurationTextWriteStatus.Succeeded, revision, null, null);
+    }
+
+    public static ConfigurationTextWriteResult Conflicted(
+        ConfigurationWriteConflict conflict)
+    {
+        ArgumentNullException.ThrowIfNull(conflict);
+        return new(ConfigurationTextWriteStatus.Conflict, null, conflict, null);
+    }
 
     public static ConfigurationTextWriteResult Failed(
         IEnumerable<ConfigurationStorageProblem> problems) =>
-        new(ConfigurationTextWriteStatus.Failed, problems);
+        new(ConfigurationTextWriteStatus.Failed, null, null, problems);
 }

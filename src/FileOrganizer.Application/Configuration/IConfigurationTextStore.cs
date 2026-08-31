@@ -8,7 +8,6 @@ public interface IConfigurationTextStore
         CancellationToken cancellationToken = default);
 
     ValueTask<ConfigurationTextWriteResult> WriteAsync(
-        string path,
-        string content,
+        ConfigurationTextWriteRequest request,
         CancellationToken cancellationToken = default);
 }
