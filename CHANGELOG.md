@@ -5,6 +5,11 @@ All notable user-facing changes are documented here. FileOrganizer follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Release packaging now retries bounded transient Windows directory-lock failures
+  while revalidating the generated path and reparse boundary before every attempt.
+
 ## [0.1.0-beta.1] - 2026-08-31
 
 ### Added

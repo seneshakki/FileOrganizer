@@ -1152,6 +1152,142 @@ public sealed class WindowsPortablePackageVerifierTests
     }
 
     [Fact]
+    public void PublishScriptRetriesOnlyRevalidatedGeneratedDirectoryCleanup()
+    {
+        string scriptPath = Path.Combine(
+            AppContext.BaseDirectory,
+            "Release",
+            "Publish-WindowsPortable.ps1");
+        Assert.True(File.Exists(scriptPath), $"Publish script was not copied to {scriptPath}.");
+        string script = File.ReadAllText(scriptPath);
+        string cleanupHelper = GetRequiredScriptSection(
+            script,
+            "function Remove-ValidatedDirectoryTreeWithRetry",
+            "function Set-ProcessEnvironmentVariable");
+
+        foreach (string contract in new[]
+                 {
+                     "for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++)",
+                     "$cleanupParent.FullName",
+                     "$cleanupName -notmatch $ExpectedNamePattern",
+                     "$currentBoundaryPath = $expectedParentPath",
+                     "$currentBoundaryPath,",
+                     "$trustedBoundaryPath,",
+                     "$boundaryEntry.PSIsContainer",
+                     "[IO.FileAttributes]::ReparsePoint",
+                     "Remove-Item -LiteralPath $cleanupTarget -Recurse -Force",
+                     "Test-RetryableDirectoryCleanupError $removeError",
+                     "& $DelayAction $RetryDelayMilliseconds",
+                 })
+        {
+            Assert.Contains(contract, cleanupHelper, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("[IO.IOException]", script, StringComparison.Ordinal);
+        Assert.Contains("$win32Error -eq 32 -or $win32Error -eq 33", script, StringComparison.Ordinal);
+        Assert.Contains("[int] $MaximumAttempts = 6", cleanupHelper, StringComparison.Ordinal);
+        Assert.Contains("[int] $RetryDelayMilliseconds = 200", cleanupHelper, StringComparison.Ordinal);
+        Assert.Equal(
+            3,
+            Regex.Count(
+                script,
+                "Remove-ValidatedDirectoryTreeWithRetry",
+                RegexOptions.CultureInvariant));
+        Assert.Contains(
+            "-ExpectedNamePattern '^\\.FileOrganizer-staging-[0-9a-f]{32}$'",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "-ExpectedNamePattern '^FileOrganizer-release-[0-9a-f]{32}$'",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "if ($locationPushed)",
+            script,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PublishScriptRetriesARealWindowsSharingViolation()
+    {
+        RequireWindowsPowerShell();
+        string scriptPath = Path.Combine(
+            AppContext.BaseDirectory,
+            "Release",
+            "Publish-WindowsPortable.ps1");
+        Assert.True(File.Exists(scriptPath), $"Publish script was not copied to {scriptPath}.");
+        string escapedScriptPath = scriptPath.Replace("'", "''", StringComparison.Ordinal);
+        string command = $$"""
+            $ErrorActionPreference = "Stop"
+            $publishScript = '{{escapedScriptPath}}'
+            $scriptDirectory = [IO.Directory]::GetParent($publishScript).FullName
+            $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $scriptDirectory ".."))
+            $invalidOutput = Join-Path $repositoryRoot "artifacts\portable"
+            try {
+                . $publishScript -OutputDirectory $invalidOutput
+                throw "The publish script unexpectedly continued."
+            }
+            catch {
+                if ($_.Exception.Message -notlike "*must remain beneath*") {
+                    throw
+                }
+            }
+
+            $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
+            $target = Join-Path $temporaryRoot (
+                "FileOrganizer-release-" + [Guid]::NewGuid().ToString("N"))
+            $lockedStream = $null
+            try {
+                $null = [IO.Directory]::CreateDirectory($target)
+                $lockedFile = Join-Path $target "locked.bin"
+                $lockedStream = [IO.File]::Open(
+                    $lockedFile,
+                    [IO.FileMode]::CreateNew,
+                    [IO.FileAccess]::ReadWrite,
+                    [IO.FileShare]::Read)
+                $delayCalls = 0
+                $releaseLock = {
+                    param([int] $Milliseconds)
+                    $script:delayCalls++
+                    $script:lockedStream.Dispose()
+                    $script:lockedStream = $null
+                }
+
+                Remove-ValidatedDirectoryTreeWithRetry `
+                    -Path $target `
+                    -ExpectedParent $temporaryRoot `
+                    -TrustedBoundary $temporaryRoot `
+                    -ExpectedNamePattern '^FileOrganizer-release-[0-9a-f]{32}$' `
+                    -TargetDescription "release retry test workspace" `
+                    -MaximumAttempts 3 `
+                    -RetryDelayMilliseconds 0 `
+                    -DelayAction $releaseLock
+
+                if ($delayCalls -ne 1) {
+                    throw "Expected one retry delay, observed $delayCalls."
+                }
+                if (Test-Path -LiteralPath $target) {
+                    throw "The retry did not remove the generated test workspace."
+                }
+                Write-Output "sharing-violation-retry-ok"
+            }
+            finally {
+                if ($null -ne $lockedStream) {
+                    $lockedStream.Dispose()
+                }
+                if (Test-Path -LiteralPath $target) {
+                    [IO.Directory]::Delete($target, $true)
+                }
+            }
+            """;
+
+        VerificationProcessResult result = await RunPowerShellCommandAsync(command);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("sharing-violation-retry-ok", result.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task WindowsPowerShellFiveSupportsTheExplicitNulSplitOverload()
     {
         RequireWindowsPowerShell();

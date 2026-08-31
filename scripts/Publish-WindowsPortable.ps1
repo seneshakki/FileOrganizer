@@ -42,6 +42,111 @@ function Remove-TrailingDirectorySeparator([string] $Path) {
     return $fullPath
 }
 
+function Test-RetryableDirectoryCleanupError(
+    [Management.Automation.ErrorRecord] $ErrorRecord) {
+    $exception = $ErrorRecord.Exception
+    while ($null -ne $exception) {
+        if ($exception -is [IO.IOException]) {
+            $win32Error = $exception.HResult -band 0xffff
+            if ($win32Error -eq 32 -or $win32Error -eq 33) {
+                return $true
+            }
+        }
+
+        $exception = $exception.InnerException
+    }
+
+    return $false
+}
+
+function Remove-ValidatedDirectoryTreeWithRetry(
+    [string] $Path,
+    [string] $ExpectedParent,
+    [string] $TrustedBoundary,
+    [string] $ExpectedNamePattern,
+    [string] $TargetDescription,
+    [int] $MaximumAttempts = 6,
+    [int] $RetryDelayMilliseconds = 200,
+    [scriptblock] $DelayAction = {
+        param([int] $Milliseconds)
+        [Threading.Thread]::Sleep($Milliseconds)
+    }) {
+    if ($MaximumAttempts -lt 1 -or $RetryDelayMilliseconds -lt 0) {
+        throw "Directory cleanup retry settings are invalid."
+    }
+
+    $cleanupTarget = [IO.Path]::GetFullPath($Path)
+    $expectedParentPath = Remove-TrailingDirectorySeparator($ExpectedParent)
+    $trustedBoundaryPath = Remove-TrailingDirectorySeparator($TrustedBoundary)
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        if (-not (Test-Path -LiteralPath $cleanupTarget)) {
+            return
+        }
+
+        $cleanupParent = [IO.Directory]::GetParent($cleanupTarget)
+        $cleanupName = [IO.Path]::GetFileName($cleanupTarget)
+        if ($null -eq $cleanupParent -or
+            -not [string]::Equals(
+                $cleanupParent.FullName,
+                $expectedParentPath,
+                [StringComparison]::OrdinalIgnoreCase) -or
+            $cleanupName -notmatch $ExpectedNamePattern) {
+            throw "Refusing to clean an unconstrained $TargetDescription`: $cleanupTarget"
+        }
+
+        $currentBoundaryPath = $expectedParentPath
+        $reachedTrustedBoundary = $false
+        while ($null -ne $currentBoundaryPath) {
+            $boundaryEntry = Get-Item -LiteralPath $currentBoundaryPath -Force
+            if (-not $boundaryEntry.PSIsContainer -or
+                ($boundaryEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Refusing to clean through an invalid or reparse boundary: $currentBoundaryPath"
+            }
+            if ([string]::Equals(
+                    $currentBoundaryPath,
+                    $trustedBoundaryPath,
+                    [StringComparison]::OrdinalIgnoreCase)) {
+                $reachedTrustedBoundary = $true
+                break
+            }
+
+            $boundaryParent = [IO.Directory]::GetParent($currentBoundaryPath)
+            $currentBoundaryPath = if ($null -eq $boundaryParent) {
+                $null
+            }
+            else {
+                $boundaryParent.FullName
+            }
+        }
+        if (-not $reachedTrustedBoundary) {
+            throw "Refusing cleanup outside the trusted boundary: $trustedBoundaryPath"
+        }
+
+        $cleanupEntry = Get-Item -LiteralPath $cleanupTarget -Force
+        if (-not $cleanupEntry.PSIsContainer -or
+            ($cleanupEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Refusing to recursively clean a reparse $TargetDescription`: $cleanupTarget"
+        }
+
+        try {
+            Remove-Item -LiteralPath $cleanupTarget -Recurse -Force
+            return
+        }
+        catch {
+            $removeError = $_
+            if (-not (Test-Path -LiteralPath $cleanupTarget)) {
+                return
+            }
+            if ($attempt -eq $MaximumAttempts -or
+                -not (Test-RetryableDirectoryCleanupError $removeError)) {
+                throw
+            }
+
+            & $DelayAction $RetryDelayMilliseconds
+        }
+    }
+}
+
 function Set-ProcessEnvironmentVariable(
     [string] $Name,
     [AllowNull()]
@@ -851,62 +956,35 @@ finally {
     }
 
     if (Test-Path -LiteralPath $stagingDirectory) {
-        $stagingCleanupTarget = [IO.Path]::GetFullPath($stagingDirectory)
-        $stagingCleanupParent = [IO.Directory]::GetParent($stagingCleanupTarget)
-        $stagingCleanupName = [IO.Path]::GetFileName($stagingCleanupTarget)
-        if ($null -eq $stagingCleanupParent -or
-            -not [string]::Equals(
-                $stagingCleanupParent.FullName,
-                $artifactRoot,
-                [StringComparison]::OrdinalIgnoreCase) -or
-            $stagingCleanupName -notmatch
-                '^\.FileOrganizer-staging-[0-9a-f]{32}$') {
-            $cleanupProblems.Add(
-                "Refusing to clean an unconstrained package staging path: $stagingCleanupTarget")
-            Write-Warning $cleanupProblems[$cleanupProblems.Count - 1]
+        try {
+            Remove-ValidatedDirectoryTreeWithRetry `
+                -Path $stagingDirectory `
+                -ExpectedParent $artifactRoot `
+                -TrustedBoundary $repositoryRoot `
+                -ExpectedNamePattern '^\.FileOrganizer-staging-[0-9a-f]{32}$' `
+                -TargetDescription "package staging path"
         }
-        elseif (((Get-Item -LiteralPath $stagingCleanupTarget -Force).Attributes -band
-                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        catch {
             $cleanupProblems.Add(
-                "Refusing to recursively clean a reparse package staging path: $stagingCleanupTarget")
+                "The package staging directory could not be cleaned: $($_.Exception.Message)")
             Write-Warning $cleanupProblems[$cleanupProblems.Count - 1]
-        }
-        else {
-            try {
-                Remove-Item -LiteralPath $stagingCleanupTarget -Recurse -Force
-            }
-            catch {
-                $cleanupProblems.Add(
-                    "The package staging directory could not be cleaned: $($_.Exception.Message)")
-                Write-Warning $cleanupProblems[$cleanupProblems.Count - 1]
-            }
         }
     }
 
     if (Test-Path -LiteralPath $isolatedRoot) {
-        $cleanupTarget = [IO.Path]::GetFullPath($isolatedRoot)
-        $cleanupParent = [IO.Directory]::GetParent($cleanupTarget)
-        $cleanupName = [IO.Path]::GetFileName($cleanupTarget)
-        if ($locationPushed -or
-            $null -eq $cleanupParent -or
-            -not [string]::Equals(
-                $cleanupParent.FullName,
-                $systemTemporaryRoot,
-                [StringComparison]::OrdinalIgnoreCase) -or
-            $cleanupName -notmatch '^FileOrganizer-release-[0-9a-f]{32}$') {
+        if ($locationPushed) {
             $cleanupProblems.Add(
-                "Refusing to clean an unconstrained or active release workspace: $cleanupTarget")
-            Write-Warning $cleanupProblems[$cleanupProblems.Count - 1]
-        }
-        elseif (((Get-Item -LiteralPath $cleanupTarget -Force).Attributes -band
-                [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            $cleanupProblems.Add(
-                "Refusing to recursively clean a reparse release workspace: $cleanupTarget")
+                "Refusing to clean an active release workspace: $isolatedRoot")
             Write-Warning $cleanupProblems[$cleanupProblems.Count - 1]
         }
         else {
             try {
-                Remove-Item -LiteralPath $cleanupTarget -Recurse -Force
+                Remove-ValidatedDirectoryTreeWithRetry `
+                    -Path $isolatedRoot `
+                    -ExpectedParent $systemTemporaryRoot `
+                    -TrustedBoundary $systemTemporaryRoot `
+                    -ExpectedNamePattern '^FileOrganizer-release-[0-9a-f]{32}$' `
+                    -TargetDescription "release workspace"
             }
             catch {
                 $cleanupProblems.Add(
