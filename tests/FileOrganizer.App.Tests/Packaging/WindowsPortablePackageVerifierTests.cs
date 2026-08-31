@@ -539,14 +539,14 @@ public sealed class WindowsPortablePackageVerifierTests
                 "(?s)\\$previousAssemblyUnderTest\\s*=\\s*"
                     + "\\[Environment\\]::GetEnvironmentVariable\\(.*?"
                     + "try\\s*\\{.*?"
-                    + "\\[Environment\\]::SetEnvironmentVariable\\(\\s*"
-                    + "\\$assemblyUnderTestVariable,\\s*\\$publishedAppAssembly,\\s*"
-                    + "\\[EnvironmentVariableTarget\\]::Process\\).*?"
+                    + "Set-ProcessEnvironmentVariable\\s*`\\s*"
+                    + "-Name\\s+\\$assemblyUnderTestVariable\\s*`\\s*"
+                    + "-Value\\s+\\$publishedAppAssembly.*?"
                     + "& dotnet @artifactBoundaryTestArguments.*?"
                     + "\\}\\s*finally\\s*\\{\\s*"
-                    + "\\[Environment\\]::SetEnvironmentVariable\\(\\s*"
-                    + "\\$assemblyUnderTestVariable,\\s*\\$previousAssemblyUnderTest,\\s*"
-                    + "\\[EnvironmentVariableTarget\\]::Process\\)",
+                    + "Set-ProcessEnvironmentVariable\\s*`\\s*"
+                    + "-Name\\s+\\$assemblyUnderTestVariable\\s*`\\s*"
+                    + "-Value\\s+\\$previousAssemblyUnderTest",
                 RegexOptions.CultureInvariant),
             script);
     }
@@ -679,18 +679,24 @@ public sealed class WindowsPortablePackageVerifierTests
             new Regex(
                 "(?s)foreach\\s*\\(\\$environmentName in "
                     + "\\$gitEnvironmentOverrides\\.Keys\\).*?"
-                    + "\\[Environment\\]::SetEnvironmentVariable\\(\\s*"
-                    + "\\$environmentName,\\s*"
-                    + "\\$gitEnvironmentOverrides\\[\\$environmentName\\]",
+                    + "Set-ProcessEnvironmentVariable\\s*`\\s*"
+                    + "-Name\\s+\\$environmentName\\s*`\\s*"
+                    + "-Value\\s+\\$gitEnvironmentOverrides\\[\\$environmentName\\]",
                 RegexOptions.CultureInvariant),
             script);
         Assert.Matches(
             new Regex(
                 "(?s)finally\\s*\\{\\s*foreach\\s*\\(\\$environmentName in "
                     + "\\$appliedGitEnvironmentNames\\).*?"
-                    + "\\$previousGitEnvironment\\[\\$environmentName\\]",
+                    + "Set-ProcessEnvironmentVariable\\s*`\\s*"
+                    + "-Name\\s+\\$environmentName\\s*`\\s*"
+                    + "-Value\\s+\\$previousGitEnvironment\\[\\$environmentName\\]",
                 RegexOptions.CultureInvariant),
             script);
+        Assert.Contains(
+            "[Management.Automation.Language.NullString]::Value",
+            script,
+            StringComparison.Ordinal);
 
         Assert.Contains("--no-replace-objects", script, StringComparison.Ordinal);
         Assert.Contains("--source=$Commit", script, StringComparison.Ordinal);

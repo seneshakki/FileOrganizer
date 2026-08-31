@@ -42,6 +42,23 @@ function Remove-TrailingDirectorySeparator([string] $Path) {
     return $fullPath
 }
 
+function Set-ProcessEnvironmentVariable(
+    [string] $Name,
+    [AllowNull()]
+    [object] $Value) {
+    $environmentValue = if ($null -eq $Value) {
+        [Management.Automation.Language.NullString]::Value
+    }
+    else {
+        [string] $Value
+    }
+
+    [Environment]::SetEnvironmentVariable(
+        $Name,
+        $environmentValue,
+        [EnvironmentVariableTarget]::Process)
+}
+
 function Write-ExactGitBlob(
     [string] $GitDirectory,
     [string] $ObjectId,
@@ -406,10 +423,9 @@ try {
                 $environmentName,
                 [EnvironmentVariableTarget]::Process)
         $appliedGitEnvironmentNames.Add($environmentName)
-        [Environment]::SetEnvironmentVariable(
-            $environmentName,
-            $gitEnvironmentOverrides[$environmentName],
-            [EnvironmentVariableTarget]::Process)
+        Set-ProcessEnvironmentVariable `
+            -Name $environmentName `
+            -Value $gitEnvironmentOverrides[$environmentName]
     }
 
     $headOutput = @(
@@ -664,10 +680,9 @@ try {
         $assemblyUnderTestVariable,
         [EnvironmentVariableTarget]::Process)
     try {
-        [Environment]::SetEnvironmentVariable(
-            $assemblyUnderTestVariable,
-            $publishedAppAssembly,
-            [EnvironmentVariableTarget]::Process)
+        Set-ProcessEnvironmentVariable `
+            -Name $assemblyUnderTestVariable `
+            -Value $publishedAppAssembly
         $artifactBoundaryTestArguments = @(
             "test",
             $isolatedAppTests,
@@ -717,10 +732,9 @@ try {
         }
     }
     finally {
-        [Environment]::SetEnvironmentVariable(
-            $assemblyUnderTestVariable,
-            $previousAssemblyUnderTest,
-            [EnvironmentVariableTarget]::Process)
+        Set-ProcessEnvironmentVariable `
+            -Name $assemblyUnderTestVariable `
+            -Value $previousAssemblyUnderTest
     }
 
     & $isolatedVerifier `
@@ -866,9 +880,8 @@ if ($cleanupProblems.Count -ne 0) {
 }
 finally {
     foreach ($environmentName in $appliedGitEnvironmentNames) {
-        [Environment]::SetEnvironmentVariable(
-            $environmentName,
-            $previousGitEnvironment[$environmentName],
-            [EnvironmentVariableTarget]::Process)
+        Set-ProcessEnvironmentVariable `
+            -Name $environmentName `
+            -Value $previousGitEnvironment[$environmentName]
     }
 }
